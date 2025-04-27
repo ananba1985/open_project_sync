@@ -30,6 +30,8 @@ class OpenProjectClient:
         self._statuses_cache = None
         self._projects_cache = None
         self._project_form_config_cache = {}
+        self._field_name_to_id_cache = {}  # 字段名称到ID的映射缓存
+        self._cities_cache = None  # 城市列表缓存
         self._debug_mode = False  # 调试模式开关
         
         # 添加一个变量用于存储最后一次请求的工作包总数
@@ -72,9 +74,25 @@ class OpenProjectClient:
         
         print(f"API凭证已更新: URL={self.api_url}, Token={self.api_token[:5] if self.api_token else None}...")
         
-        # 清空缓存
+        # 清空所有缓存
         self._projects_cache = None
         self._project_form_config_cache = {}
+        self._custom_fields_cache = None
+        self._types_cache = None
+        self._statuses_cache = None
+        self._field_name_to_id_cache = {}
+        self._cities_cache = None
+        
+        # 删除所有特定的缓存属性，确保完全重置状态
+        for cache_attr in ['_city_field_id_cache', '_loading_projects', '_loading_projects_callbacks', '_last_work_packages_total']:
+            if hasattr(self, cache_attr):
+                if cache_attr == '_loading_projects':
+                    self._loading_projects = False
+                    self._loading_projects_callbacks = []
+                else:
+                    delattr(self, cache_attr)
+        
+        print("所有缓存已清空，将在下次请求时重新获取数据")
     
     def get_projects(self, force_refresh=False, page=1, page_size=100):
         """获取所有项目列表
@@ -183,6 +201,11 @@ class OpenProjectClient:
             
     def get_custom_fields(self):
         """获取自定义字段列表"""
+        # 使用已有的缓存属性
+        if self._custom_fields_cache is not None:
+            print("从缓存返回自定义字段列表")
+            return self._custom_fields_cache
+            
         try:
             url = f"{self.api_url}/api/v3/custom_fields"
             
@@ -196,16 +219,24 @@ class OpenProjectClient:
                 result = response.json()
                 custom_fields = result.get("_embedded", {}).get("elements", [])
                 print(f"获取到 {len(custom_fields)} 个自定义字段")
+                # 缓存结果
+                self._custom_fields_cache = custom_fields
                 return custom_fields
             else:
                 print(f"获取自定义字段失败: {response.status_code} - {response.text}")
                 # API不可用，尝试从工作包获取自定义字段信息
                 print("尝试从工作包中获取自定义字段信息...")
-                return self._get_custom_fields_from_work_packages()
+                fields_from_wp = self._get_custom_fields_from_work_packages()
+                # 缓存结果
+                self._custom_fields_cache = fields_from_wp
+                return fields_from_wp
         except Exception as e:
             print(f"获取自定义字段出错: {str(e)}")
             print("尝试从工作包中获取自定义字段信息...")
-            return self._get_custom_fields_from_work_packages()
+            fields_from_wp = self._get_custom_fields_from_work_packages()
+            # 缓存结果
+            self._custom_fields_cache = fields_from_wp
+            return fields_from_wp
         
     def get_statuses(self):
         """获取状态列表"""
@@ -662,13 +693,35 @@ class OpenProjectClient:
                                     field_href = value.get("href", "")
                                     field_title = value.get("title", "")
                                     
+                                    # 检查是否有自定义字段映射
+                                    mapped_field_id = None
+                                    if field_id in custom_field_mapping:
+                                        mapped_field_id = custom_field_mapping[field_id]
+                                        mapped_key = f"customField{mapped_field_id}"
+                                        print(f"应用自定义字段映射: {key} -> {mapped_key}")
+                                    else:
+                                        mapped_key = key
+                                    
                                     if field_href and field_title:
-                                        print(f"处理自定义字段: {key}, 值: {field_title}")
+                                        print(f"处理自定义字段: {mapped_key}, 值: {field_title}")
                                         # 添加到新工作包数据
-                                        new_wp_data["_links"][key] = {
+                                        new_wp_data["_links"][mapped_key] = {
                                             "href": field_href,
                                             "title": field_title
                                         }
+                                        
+                                        # 特殊处理城市字段
+                                        if field_id == "1" and "城市" in field_title:
+                                            # 获取城市字段ID
+                                            city_field_id = self.get_city_field_id()
+                                            city_key = f"customField{city_field_id}"
+                                            # 如果与原始键不同，则添加城市字段
+                                            if city_key != mapped_key:
+                                                print(f"添加城市字段映射: {city_key}, 值: {field_title}")
+                                                new_wp_data["_links"][city_key] = {
+                                                    "href": field_href,
+                                                    "title": field_title
+                                                }
                         
                         # 创建工作包
                         create_url = f"{self.api_url}/api/v3/work_packages"
@@ -1145,82 +1198,178 @@ class OpenProjectClient:
 
     def get_cities(self):
         """获取城市列表"""
+        # 添加缓存
+        if hasattr(self, '_cities_cache') and self._cities_cache:
+            # 确保城市对象包含name字段
+            for city in self._cities_cache:
+                if "value" in city and "name" not in city:
+                    city["name"] = city["value"]
+            print("从缓存返回城市列表")
+            return self._cities_cache
+            
         print("正在获取城市列表...")
         
+        # 获取城市字段ID - 这里会使用缓存，不会重复查询
+        city_field_id = self.get_city_field_id()
+        city_field_key = f"customField{city_field_id}"
+        print(f"使用城市字段ID: {city_field_id}, 字段键: {city_field_key}")
+        
         # 从获取的工作包中提取城市信息
-        try:
-            # 获取项目列表
-            projects = self.get_projects()
-            if not projects:
-                print("无法获取项目列表")
-                return []
-            
-            project_id = projects[0].get("id")
-            
-            # 获取工作包列表（较大数量以确保覆盖各种城市）
-            work_packages = self.get_work_packages(project_id, page=1, page_size=200)
-            if not work_packages:
-                print("无法获取工作包列表")
-                # 尝试之前的方法
-                return []
-            
-            # 从工作包中提取城市信息
-            cities_dict = {}
-            
-            for wp in work_packages:
-                if "_links" in wp and "customField1" in wp["_links"]:
-                    city_link = wp["_links"]["customField1"]
-                    
-                    # 处理不同格式的城市字段
-                    if isinstance(city_link, dict):
-                        city_href = city_link.get("href", "")
-                        city_title = city_link.get("title", "")
-                        
-                        if city_href and city_title:
-                            # 从href中提取ID
-                            city_id = city_href.split("/")[-1]
-                            
-                            # 添加到字典中
-                            if city_id not in cities_dict:
-                                cities_dict[city_id] = {
-                                    "id": city_id,
-                                    "name": city_title,
-                                    "href": city_href
-                                }
-                    
-                    # 如果是列表，处理多个城市
-                    elif isinstance(city_link, list):
-                        for city in city_link:
-                            if isinstance(city, dict):
-                                city_href = city.get("href", "")
-                                city_title = city.get("title", "")
-                                
-                                if city_href and city_title:
-                                    # 从href中提取ID
-                                    city_id = city_href.split("/")[-1]
-                                    
-                                    # 添加到字典中
-                                    if city_id not in cities_dict:
-                                        cities_dict[city_id] = {
-                                            "id": city_id,
-                                            "name": city_title,
-                                            "href": city_href
-                                        }
-            
-            # 转换为列表
-            cities = list(cities_dict.values())
-            print(f"从工作包中提取到 {len(cities)} 个城市")
-            
-            # 如果找不到城市，返回空列表
-            if not cities:
-                print("从工作包中未找到城市信息，尝试其他方法")
-                return []
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # 获取项目列表
+                projects = self.get_projects(force_refresh=(retry_count > 0))
+                if not projects:
+                    print(f"无法获取项目列表 (尝试 {retry_count+1}/{max_retries})")
+                    retry_count += 1
+                    time.sleep(1)  # 等待一秒后重试
+                    continue
                 
-            return cities
+                project_id = projects[0].get("id")
+                
+                # 尝试直接从自定义字段选项获取城市列表（更高效）
+                cities = self.get_custom_field_options(city_field_id)
+                if cities:
+                    print(f"从自定义字段选项获取到 {len(cities)} 个城市")
+                    # 确保每个城市对象都有name字段
+                    for city in cities:
+                        if "value" in city and "name" not in city:
+                            city["name"] = city["value"]
+                    # 缓存结果
+                    self._cities_cache = cities
+                    return cities
+                
+                print(f"从自定义字段选项获取城市失败，尝试从工作包提取 (尝试 {retry_count+1}/{max_retries})")
+                
+                # 如果从选项获取失败，尝试不同页大小的工作包
+                page_sizes = [200, 100, 50]
+                for page_size in page_sizes:
+                    print(f"尝试获取 {page_size} 个工作包...")
+                    work_packages = self.get_work_packages(project_id, page=1, page_size=page_size)
+                    if work_packages:
+                        break
+                
+                if not work_packages:
+                    print(f"无法获取工作包列表 (尝试 {retry_count+1}/{max_retries})")
+                    retry_count += 1
+                    time.sleep(1)  # 等待一秒后重试
+                    continue
+                
+                print(f"成功获取 {len(work_packages)} 个工作包，开始提取城市信息...")
+                
+                # 从工作包中提取城市信息
+                cities_dict = {}
+                
+                for wp in work_packages:
+                    if "_links" in wp and city_field_key in wp["_links"]:
+                        city_link = wp["_links"][city_field_key]
+                        
+                        # 处理不同格式的城市字段
+                        if isinstance(city_link, dict):
+                            city_href = city_link.get("href", "")
+                            city_title = city_link.get("title", "")
+                            
+                            if city_href and city_title:
+                                # 从href中提取ID
+                                city_id = city_href.split("/")[-1]
+                                
+                                # 添加到字典中
+                                if city_id not in cities_dict:
+                                    cities_dict[city_id] = {
+                                        "id": city_id,
+                                        "name": city_title,  # 确保使用name字段
+                                        "value": city_title,
+                                        "href": city_href
+                                    }
+                        
+                        # 如果是列表，处理多个城市
+                        elif isinstance(city_link, list):
+                            for city in city_link:
+                                if isinstance(city, dict):
+                                    city_href = city.get("href", "")
+                                    city_title = city.get("title", "")
+                                    
+                                    if city_href and city_title:
+                                        # 从href中提取ID
+                                        city_id = city_href.split("/")[-1]
+                                        
+                                        # 添加到字典中
+                                        if city_id not in cities_dict:
+                                            cities_dict[city_id] = {
+                                                "id": city_id,
+                                                "name": city_title,  # 确保使用name字段
+                                                "value": city_title,
+                                                "href": city_href
+                                            }
+                
+                # 转换为列表
+                cities = list(cities_dict.values())
+                print(f"从工作包中提取到 {len(cities)} 个城市")
+                
+                # 如果找到了城市，返回结果
+                if cities:
+                    # 缓存结果
+                    self._cities_cache = cities
+                    return cities
+                else:
+                    print(f"未能从工作包中提取到城市 (尝试 {retry_count+1}/{max_retries})")
+                    retry_count += 1
+                    time.sleep(1)  # 等待一秒后重试
             
+            except Exception as e:
+                print(f"从工作包获取城市列表出错: {str(e)} (尝试 {retry_count+1}/{max_retries})")
+                retry_count += 1
+                time.sleep(1)  # 等待一秒后重试
+        
+        # 如果所有重试都失败，尝试额外的方法
+        print("所有常规方法获取城市失败，尝试备用方案...")
+        
+        try:
+            # 尝试获取更多项目
+            all_projects = self.get_projects(force_refresh=True)
+            
+            # 尝试在所有项目中搜索城市字段
+            for project in all_projects:
+                project_id = project.get("id")
+                print(f"尝试在项目 {project_id} 中搜索城市...")
+                
+                # 获取项目表单配置
+                form_config = self.get_project_form_configuration(project_id)
+                if form_config:
+                    # 查找城市字段
+                    field_key = f"customField{city_field_id}"
+                    if "fields" in form_config and field_key in form_config["fields"]:
+                        field_info = form_config["fields"][field_key]
+                        
+                        # 从links或embedded中查找选项
+                        if "_links" in field_info and "allowedValues" in field_info["_links"]:
+                            values = field_info["_links"]["allowedValues"]
+                            cities = []
+                            
+                            for value in values:
+                                if "href" in value and "title" in value:
+                                    option_id = value["href"].split("/")[-1]
+                                    option = {
+                                        "id": option_id,
+                                        "name": value["title"],  # 确保使用name字段
+                                        "value": value["title"],
+                                        "href": value["href"]
+                                    }
+                                    cities.append(option)
+                            
+                            if cities:
+                                print(f"从项目 {project_id} 配置中获取到 {len(cities)} 个城市")
+                                self._cities_cache = cities
+                                return cities
         except Exception as e:
-            print(f"从工作包获取城市列表出错: {str(e)}")
-            return []
+            print(f"备用方案获取城市失败: {str(e)}")
+            
+        # 如果所有方法都失败，返回空列表
+        print("所有方法都无法获取城市列表，返回空结果")
+        return []
     
     def _get_work_package_form_configuration(self, project_id):
         """通过工作包表单获取配置信息"""
@@ -1251,40 +1400,184 @@ class OpenProjectClient:
             # 获取项目列表
             projects = self.get_projects()
             if not projects:
-                print("无法获取项目列表")
+                print("无法获取项目列表，返回空字段列表")
                 return []
             
             project_id = projects[0].get("id")
             if not project_id:
-                print("无法获取项目ID")
+                print("无法获取项目ID，返回空字段列表")
                 return []
+            
+            # 尝试从工作包表单配置获取
+            try:
+                form_data = self._get_work_package_form_configuration(project_id)
+                if form_data and "fields" in form_data:
+                    custom_fields = []
+                    for field_key, field_info in form_data["fields"].items():
+                        if field_key.startswith("customField"):
+                            field_id = field_key.replace("customField", "")
+                            field_name = field_info.get("name", f"自定义字段{field_id}")
+                            custom_fields.append({
+                                "id": field_id,
+                                "name": field_name
+                            })
+                    
+                    if custom_fields:
+                        print(f"从工作包表单配置提取到 {len(custom_fields)} 个自定义字段")
+                        return custom_fields
+            except Exception as e:
+                print(f"从工作包表单提取字段出错: {str(e)}")
                 
             # 获取工作包列表
+            print("尝试从工作包列表提取自定义字段...")
             work_packages = self.get_work_packages(project_id, page=1, page_size=50)
             if not work_packages:
-                print("无法获取工作包列表")
+                print("无法获取工作包列表，返回空字段列表")
                 return []
             
             # 提取自定义字段信息
             custom_fields = {}
+            
+            # 检查schema信息
+            if isinstance(work_packages, dict) and "_schema" in work_packages:
+                schema = work_packages.get("_schema", {})
+                for key, value in schema.items():
+                    if key.startswith("customField"):
+                        field_id = key.replace("customField", "")
+                        field_name = value.get("name", f"自定义字段{field_id}")
+                        custom_fields[field_id] = {
+                            "id": field_id,
+                            "name": field_name
+                        }
+                
+                if custom_fields:
+                    print(f"从schema提取到 {len(custom_fields)} 个自定义字段")
+                    return list(custom_fields.values())
+            
+            # 从工作包的links提取
             for wp in work_packages:
                 if "_links" in wp:
                     links = wp["_links"]
                     for key, value in links.items():
                         if key.startswith("customField"):
                             field_id = key.replace("customField", "")
+                            field_title = ""
+                            
                             if isinstance(value, dict) and "title" in value:
+                                field_title = value.get("title", "")
+                            
+                            if field_id not in custom_fields:
                                 custom_fields[field_id] = {
                                     "id": field_id,
                                     "name": f"自定义字段{field_id}",
-                                    "value": value.get("title", "")
+                                    "value": field_title
                                 }
             
-            print(f"从工作包中提取到 {len(custom_fields)} 个自定义字段")
-            return list(custom_fields.values())
+            result = list(custom_fields.values())
+            print(f"从工作包links提取到 {len(result)} 个自定义字段")
+            return result
+            
         except Exception as e:
             print(f"从工作包提取自定义字段出错: {str(e)}")
+            print("返回空字段列表")
             return []
+
+    def get_custom_field_id_by_name(self, field_name):
+        """通过字段名称获取自定义字段ID
+        
+        Args:
+            field_name: 自定义字段名称，如"城市"
+            
+        Returns:
+            字段ID号码（例如1），如果未找到则返回None
+        """
+        # 检查缓存
+        if field_name in self._field_name_to_id_cache:
+            cached_id = self._field_name_to_id_cache[field_name]
+            print(f"从缓存获取字段 '{field_name}' 的ID: {cached_id}")
+            return cached_id
+            
+        try:
+            print(f"正在查找名为 '{field_name}' 的自定义字段...")
+            
+            # 直接获取自定义字段列表，这样更高效
+            custom_fields = self.get_custom_fields()
+            if custom_fields:
+                for field in custom_fields:
+                    if field.get("name") == field_name:
+                        field_id = field.get("id")
+                        if field_id:
+                            print(f"找到字段 '{field_name}' 对应编号: {field_id}")
+                            # 缓存结果
+                            self._field_name_to_id_cache[field_name] = field_id
+                            return field_id
+            
+            # 如果自定义字段列表中未找到，尝试通过项目表单配置
+            projects = self.get_projects()
+            if not projects:
+                print("无法获取项目列表")
+                # 缓存结果为None
+                self._field_name_to_id_cache[field_name] = None
+                return None
+            
+            project_id = projects[0].get("id")
+            if not project_id:
+                print("无法获取项目ID")
+                # 缓存结果为None
+                self._field_name_to_id_cache[field_name] = None
+                return None
+            
+            # 获取项目表单配置
+            form_config = self.get_project_form_configuration(project_id)
+            if not form_config:
+                print("无法获取项目表单配置")
+                # 缓存结果为None
+                self._field_name_to_id_cache[field_name] = None
+                return None
+                
+            # 查找匹配的字段
+            fields = form_config.get("fields", {})
+            for field_key, field_info in fields.items():
+                if field_key.startswith("customField") and field_info.get("name") == field_name:
+                    field_id = field_key.replace("customField", "")
+                    print(f"找到字段 '{field_name}' 对应编号: {field_id}")
+                    # 缓存结果
+                    self._field_name_to_id_cache[field_name] = field_id
+                    return field_id
+            
+            # 标记为未找到并缓存，避免重复查询
+            print(f"未找到名为 '{field_name}' 的自定义字段，将缓存此结果")
+            self._field_name_to_id_cache[field_name] = None
+            return None
+            
+        except Exception as e:
+            print(f"查找自定义字段时出错: {str(e)}")
+            # 发生错误时不缓存，下次可以重试
+            return None
+
+    def get_city_field_id(self):
+        """获取"城市"字段的ID
+        
+        Returns:
+            城市字段ID（如1），如果未找到则返回默认值1
+        """
+        # 添加缓存属性，避免重复查询
+        if hasattr(self, '_city_field_id_cache'):
+            return self._city_field_id_cache
+            
+        print("首次查找城市字段ID...")
+        field_id = self.get_custom_field_id_by_name("城市")
+        
+        if field_id is not None:
+            # 缓存结果
+            self._city_field_id_cache = field_id
+            print(f"找到城市字段ID: {field_id}，已缓存")
+            return field_id
+        
+        # 设置默认值为1并缓存（兼容旧版本）
+        print("未找到'城市'字段，使用默认ID: 1")
+        self._city_field_id_cache = "1"
+        return "1"
 
 # 创建API客户端实例
 api_client = OpenProjectClient()

@@ -2,7 +2,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                             QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, 
                             QProgressBar, QFileDialog, QComboBox, QGroupBox,
                             QFormLayout, QLineEdit, QCheckBox, QProgressDialog,
-                            QTabWidget, QFrame)
+                            QTabWidget, QFrame, QDialog, QHeaderView)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
 import json
 import os
@@ -287,11 +287,12 @@ class ImportThread(QThread):
     import_completed = pyqtSignal(str)  # 导入完成，参数是项目ID
     error_occurred = pyqtSignal(str)  # 错误信息
     
-    def __init__(self, file_path, project_name=None, force_relations=False):
+    def __init__(self, file_path, project_name=None, force_relations=False, custom_field_mapping=None):
         super().__init__()
         self.file_path = file_path
         self.project_name = project_name
         self.force_relations = force_relations
+        self.custom_field_mapping = custom_field_mapping or {}  # 添加自定义字段映射参数
     
     def run(self):
         try:
@@ -301,13 +302,19 @@ class ImportThread(QThread):
             with open(self.file_path, 'r', encoding='utf-8') as f:
                 project_data = json.load(f)
             
+            # 输出自定义字段映射信息（用于调试）
+            if self.custom_field_mapping:
+                self.progress_update.emit(15, f"使用 {len(self.custom_field_mapping)} 个自定义字段映射")
+                print(f"自定义字段映射: {self.custom_field_mapping}")
+            
             self.progress_update.emit(20, "文件已加载，准备导入项目")
             
             # 创建参数字典
             params = {
                 'project_data': project_data,
                 'new_name': self.project_name,
-                'force_relations': self.force_relations
+                'force_relations': self.force_relations,
+                'custom_field_mapping': self.custom_field_mapping
             }
             
             # 导入项目
@@ -401,7 +408,8 @@ class ImportThread(QThread):
             "progress_callback": progress_callback,
             "type_mapping": type_mapping,
             "status_mapping": status_mapping,
-            "force_relations": force_relations  # 添加强制处理关系选项
+            "force_relations": force_relations,  # 添加强制处理关系选项
+            "custom_field_mapping": self.custom_field_mapping  # 添加自定义字段映射
         }
         
         # 执行导入
@@ -632,6 +640,28 @@ class ExportImportWidget(QWidget):
         
         if not file_path:
             return  # 用户取消
+            
+        # 读取项目文件以获取自定义字段信息
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+                
+            # 获取自定义字段信息
+            custom_fields = project_data.get("custom_fields", [])
+            
+            # 如果有自定义字段，显示映射对话框
+            custom_field_mapping = {}
+            if custom_fields:
+                mapping_dialog = CustomFieldMappingDialog(custom_fields, self)
+                if mapping_dialog.exec_() == QDialog.Accepted:
+                    custom_field_mapping = mapping_dialog.get_mapping()
+                    self.status_label.setText(f"已设置 {len(custom_field_mapping)} 个自定义字段映射")
+                else:
+                    self.status_label.setText("用户取消了自定义字段映射")
+                    # 用户取消映射但仍继续导入
+        except Exception as e:
+            QMessageBox.warning(self, "读取文件失败", f"无法读取项目文件或获取自定义字段信息:\n{str(e)}")
+            return
         
         # 获取新项目名称
         project_name = self.import_name_edit.text().strip()
@@ -641,7 +671,12 @@ class ExportImportWidget(QWidget):
         self.progress_bar.setVisible(True)
         
         # 创建导入线程
-        self.import_thread = ImportThread(file_path, project_name, self.force_relations_checkbox.isChecked())
+        self.import_thread = ImportThread(
+            file_path, 
+            project_name, 
+            self.force_relations_checkbox.isChecked(),
+            custom_field_mapping  # 传入字段映射
+        )
         
         # 连接信号
         self.import_thread.progress_update.connect(self.update_progress)
@@ -674,4 +709,135 @@ class ExportImportWidget(QWidget):
     def on_import_error(self, error_msg):
         """导入错误"""
         self.progress_bar.setVisible(False)
-        QMessageBox.critical(self, "导入失败", error_msg) 
+        QMessageBox.critical(self, "导入失败", error_msg)
+
+class CustomFieldMappingDialog(QDialog):
+    """自定义字段映射对话框"""
+    
+    def __init__(self, source_fields, parent=None):
+        super().__init__(parent)
+        self.source_fields = source_fields
+        self.mapping = {}
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """设置UI界面"""
+        self.setWindowTitle("自定义字段映射")
+        self.resize(600, 400)
+        
+        layout = QVBoxLayout()
+        
+        # 说明标签
+        info_label = QLabel("源项目中的自定义字段与目标系统中的自定义字段进行映射。\n"
+                          "如果不进行映射，系统将尝试使用相同ID或相同名称的字段。")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # 字段映射表格
+        self.mapping_table = QTableWidget()
+        self.mapping_table.setColumnCount(3)
+        self.mapping_table.setHorizontalHeaderLabels(["源字段", "目标字段ID", "说明"])
+        self.mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        layout.addWidget(self.mapping_table)
+        
+        # 获取目标系统的自定义字段
+        try:
+            self.target_fields = api_client.get_custom_fields()
+            print(f"获取到 {len(self.target_fields)} 个目标系统自定义字段")
+        except Exception as e:
+            self.target_fields = []
+            print(f"获取目标系统自定义字段失败: {str(e)}")
+        
+        # 填充表格
+        self.populate_table()
+        
+        # 按钮布局
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        # 确定按钮
+        self.ok_button = QPushButton("确定")
+        self.ok_button.clicked.connect(self.accept)
+        button_layout.addWidget(self.ok_button)
+        
+        # 取消按钮
+        self.cancel_button = QPushButton("取消")
+        self.cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_button)
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+        
+    def populate_table(self):
+        """填充映射表格"""
+        if not self.source_fields:
+            self.mapping_table.setRowCount(1)
+            self.mapping_table.setItem(0, 0, QTableWidgetItem("未找到源自定义字段"))
+            self.mapping_table.setItem(0, 2, QTableWidgetItem("请确保导入文件包含自定义字段信息"))
+            return
+        
+        # 设置行数
+        self.mapping_table.setRowCount(len(self.source_fields))
+        
+        # 填充表格
+        for row, field in enumerate(self.source_fields):
+            field_id = field.get("id", "")
+            field_name = field.get("name", "未命名")
+            
+            # 源字段信息
+            source_info = f"{field_name} (ID: {field_id})"
+            self.mapping_table.setItem(row, 0, QTableWidgetItem(source_info))
+            
+            # 目标字段下拉框
+            target_combo = QComboBox()
+            target_combo.addItem("-- 不映射 --", "")
+            
+            # 添加目标系统的所有自定义字段
+            for target_field in self.target_fields:
+                target_id = target_field.get("id", "")
+                target_name = target_field.get("name", "未命名")
+                target_combo.addItem(f"{target_name} (ID: {target_id})", target_id)
+            
+            # 设置默认选择
+            default_index = 0
+            # 尝试匹配名称相同的字段
+            for i in range(target_combo.count()):
+                if field_name in target_combo.itemText(i):
+                    default_index = i
+                    break
+            target_combo.setCurrentIndex(default_index)
+            
+            self.mapping_table.setCellWidget(row, 1, target_combo)
+            
+            # 说明
+            note = "使用此控件选择映射到的目标字段"
+            self.mapping_table.setItem(row, 2, QTableWidgetItem(note))
+            
+            # 连接信号
+            target_combo.currentIndexChanged.connect(
+                lambda idx, r=row, f_id=field_id: self.update_mapping(r, f_id, idx)
+            )
+    
+    def update_mapping(self, row, source_id, combo_index):
+        """更新映射关系"""
+        combo = self.mapping_table.cellWidget(row, 1)
+        if not combo:
+            return
+            
+        target_id = combo.itemData(combo_index)
+        if target_id:
+            self.mapping[source_id] = target_id
+            # 更新说明
+            self.mapping_table.setItem(row, 2, QTableWidgetItem(f"将源字段 {source_id} 映射到目标字段 {target_id}"))
+        else:
+            # 如果选择不映射，则从映射中移除
+            if source_id in self.mapping:
+                del self.mapping[source_id]
+            # 更新说明
+            self.mapping_table.setItem(row, 2, QTableWidgetItem("此字段不会被映射"))
+    
+    def get_mapping(self):
+        """获取映射结果"""
+        return self.mapping 

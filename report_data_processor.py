@@ -122,18 +122,21 @@ class ReportDataProcessor:
 
     def is_task_belongs_to_city(self, task, city):
         """检查任务是否属于指定城市"""
+        # 获取城市字段ID
+        city_field_id = api_client.get_city_field_id()
+        city_field_key = f"customField{city_field_id}"
+        
         city_id = city.get("id", "")
         city_name = city.get("name", "")
         
         # 检查任务的自定义字段中是否包含城市信息
-        # 假设自定义字段1是城市字段
         task_city = None
-        if "customField1" in task:
-            task_city = task["customField1"]
+        if city_field_key in task:
+            task_city = task[city_field_key]
         
         # 检查是否有_links中的customField1
-        if not task_city and "_links" in task and "customField1" in task["_links"]:
-            task_city = task["_links"]["customField1"]
+        if not task_city and "_links" in task and city_field_key in task["_links"]:
+            task_city = task["_links"][city_field_key]
         
         if isinstance(task_city, dict):
             return (

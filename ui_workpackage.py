@@ -2,9 +2,10 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                             QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, 
                             QProgressBar, QSplitter, QTabWidget, QFormLayout, 
                             QLineEdit, QTextEdit, QComboBox, QDialog, QDialogButtonBox,
-                            QDateEdit, QCheckBox, QGroupBox, QSpinBox, QProgressDialog)
+                            QDateEdit, QCheckBox, QGroupBox, QSpinBox, QProgressDialog,
+                            QScrollArea)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDate, QTimer
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QIcon
 import json
 from api_client import api_client
 import concurrent.futures
@@ -1096,96 +1097,89 @@ class WorkPackageDialog(QDialog):
     def setup_ui(self):
         layout = QVBoxLayout()
         
-        # 创建标签页控件
-        self.tab_widget = QTabWidget()
+        # 设置窗口标题
+        if self.mode == "create":
+            self.setWindowTitle("创建工作包")
+            self.save_button = QPushButton("创建")
+        else:
+            self.setWindowTitle("编辑工作包")
+            self.save_button = QPushButton("保存")
         
-        # 映射属性组到标签页和布局
-        self.group_tabs = {}
+        # 设置窗口图标
+        self.setWindowIcon(QIcon(":/icons/package.png"))
+        
+        # 创建滚动区域以处理大量字段
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        
+        # 创建分组
+        self.group_boxes = {}
         self.group_layouts = {}
         
-        # 创建所有属性组的标签页
-        attribute_groups = self.project_form_config.get("attributeGroups", [])
-        for group in attribute_groups:
-            group_name = group.get("name", "")
-            if not group_name:
-                continue
-                
-            # 创建标签页和布局
-            tab = QWidget()
-            form_layout = QFormLayout()
-            form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)  # 允许字段自动增长
-            form_layout.setLabelAlignment(Qt.AlignRight)  # 标签右对齐
-            form_layout.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)  # 表单左对齐顶部对齐
-            tab.setLayout(form_layout)
+        # 定义分组
+        groups = ["基本信息", "详细信息", "日期时间", "人员", "关联", "其他"]
+        for group in groups:
+            group_box = QGroupBox(group)
+            group_layout = QFormLayout()
+            group_box.setLayout(group_layout)
             
-            # 记录标签页和布局
-            self.group_tabs[group_name] = tab
-            self.group_layouts[group_name] = form_layout
+            self.group_boxes[group] = group_box
+            self.group_layouts[group] = group_layout
             
-            # 添加到标签页控件
-            self.tab_widget.addTab(tab, group_name)
+            scroll_layout.addWidget(group_box)
         
-        # 创建"其他"标签页，用于未分组的字段
-        other_tab = QWidget()
-        other_layout = QFormLayout()
-        other_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        other_layout.setLabelAlignment(Qt.AlignRight)
-        other_layout.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
-        other_tab.setLayout(other_layout)
-        self.group_tabs["其他"] = other_tab
-        self.group_layouts["其他"] = other_layout
-        self.tab_widget.addTab(other_tab, "其他")
+        # 添加一个拉伸项，让分组控件靠上
+        scroll_layout.addStretch()
         
-        # 处理所有表单字段
-        self.create_form_fields()
+        # 设置滚动区域的内容控件
+        scroll_area.setWidget(scroll_content)
         
-        layout.addWidget(self.tab_widget)
-        
-        # 按钮
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-        
-        self.setLayout(layout)
-    
-    def create_form_fields(self):
-        """创建表单字段"""
-        # 清空输入控件
+        # 为表单控件创建一个字典
         self.field_inputs = {}
         
-        # 创建分组布局
-        self.group_layouts = {
-            "基本信息": QFormLayout(),
-            "详细信息": QFormLayout(),
-            "人员": QFormLayout(),
-            "预估和进度": QFormLayout(),
-            "成本": QFormLayout(),
-            "其他": QFormLayout()
+        # 获取工作包类型信息
+        self.load_types()
+        
+        # 获取状态信息
+        self.load_statuses()
+        
+        # 获取项目表单配置
+        if self.project_id:
+            form_config = api_client.get_project_form_configuration(self.project_id)
+            self.project_form_config = form_config
+        else:
+            form_config = {}
+            self.project_form_config = {}
+        
+        # 获取字段定义
+        fields = form_config.get("fields", {})
+        
+        # 定义字段分组
+        attribute_to_group = {
+            "subject": "基本信息",
+            "type": "基本信息",
+            "status": "基本信息",
+            "description": "详细信息",
+            "startDate": "日期时间",
+            "dueDate": "日期时间",
+            "estimatedTime": "详细信息",
+            "percentageDone": "详细信息",
+            "assignee": "人员",
+            "responsible": "人员",
+            "priority": "详细信息",
+            "version": "关联",
+            "parent": "关联"
         }
         
-        # 添加布局到各个标签页
-        self.basic_layout.addLayout(self.group_layouts["基本信息"])
-        self.detail_layout.addLayout(self.group_layouts["详细信息"])
-        self.people_layout.addLayout(self.group_layouts["人员"])
-        self.estimate_layout.addLayout(self.group_layouts["预估和进度"])
-        self.cost_layout.addLayout(self.group_layouts["成本"])
-        self.other_layout.addLayout(self.group_layouts["其他"])
+        # 获取城市字段ID和字段键
+        city_field_id = api_client.get_city_field_id()
+        city_field_key = f"customField{city_field_id}"
         
-        # 获取字段列表
-        fields = self.project_form_config.get("fields", {})
+        # 将城市字段添加到基本信息分组
+        attribute_to_group[city_field_key] = "基本信息"
         
-        # 获取属性分组信息
-        attribute_groups = self.project_form_config.get("attributeGroups", [])
-        attribute_to_group = {}
-        
-        # 创建属性到分组的映射
-        for group in attribute_groups:
-            group_name = group.get("name", "")
-            attributes = group.get("attributes", [])
-            for attr in attributes:
-                attribute_to_group[attr] = group_name
-                
         # 创建字段输入控件
         for key, field_info in fields.items():
             field_type = field_info.get("type", "")
@@ -1204,8 +1198,7 @@ class WorkPackageDialog(QDialog):
             elif key.startswith("customField"):
                 self.create_custom_field(key, field_info, attribute_to_group)
         
-        # 特殊处理：确保城市字段(customField1)总是被创建，即使它不在表单配置中
-        city_field_key = "customField1"
+        # 特殊处理：确保城市字段总是被创建，即使它不在表单配置中
         if city_field_key not in self.field_inputs:
             print(f"表单配置中未找到城市字段({city_field_key})，手动创建")
             # 创建一个模拟的字段信息
@@ -1214,7 +1207,7 @@ class WorkPackageDialog(QDialog):
                 "type": "CustomOption",
                 "required": False
             }
-            self.create_custom_field(city_field_key, city_field_info, {"customField1": "基本信息"})
+            self.create_custom_field(city_field_key, city_field_info, {city_field_key: "基本信息"})
     
     def create_subject_field(self, field_info, attribute_to_group):
         """创建主题输入控件"""
@@ -1275,11 +1268,15 @@ class WorkPackageDialog(QDialog):
     def create_custom_field(self, field_key, field_info, attribute_to_group):
         """创建自定义字段输入控件"""
         field_name = field_info.get("name", field_key)
-        field_type = field_info.get("type", "String")
+        field_type = field_info.get("type", "")
         is_required = field_info.get("required", False)
         
         # 创建输入控件
         input_widget = None
+        
+        # 获取城市字段ID和字段键
+        city_field_id = api_client.get_city_field_id()
+        city_field_key = f"customField{city_field_id}"
         
         # 根据字段类型创建适当的控件
         if field_type in ["String", "Text"]:
@@ -1301,7 +1298,7 @@ class WorkPackageDialog(QDialog):
             input_widget.addItem("正在加载选项...", None)
             
             # 特殊处理城市字段
-            if "城市" in field_name or "city" in field_name.lower() or field_key == "customField1":
+            if "城市" in field_name or "city" in field_name.lower() or field_key == city_field_key:
                 print(f"检测到城市字段: {field_name} (字段键: {field_key})")
                 # 设置特殊样式以便识别
                 input_widget.setStyleSheet("QComboBox { background-color: #e6f7ff; border: 1px solid #1890ff; }")

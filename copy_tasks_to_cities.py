@@ -22,62 +22,15 @@ def get_cities():
     """获取城市列表（自定义字段选项）"""
     log("正在获取城市列表...")
     
-    # 从项目表单配置中获取城市列表
-    cities = []
+    # 直接使用API客户端的方法获取城市列表
+    cities = api_client.get_cities()
     
-    # 获取项目列表
-    projects = api_client.get_projects()
-    if not projects:
-        log("无法获取项目列表")
+    if not cities:
+        log("无法获取城市列表")
         return None
     
-    # 使用第一个项目获取表单配置
-    project_id = projects[0].get("id")
-    if not project_id:
-        log("无法获取项目ID")
-        return None
-    
-    # 获取项目表单配置
-    form_config = api_client.get_project_form_configuration(project_id)
-    if not form_config:
-        log("无法获取项目表单配置")
-        return None
-    
-    # 查找城市字段（customField1）
-    field_key = "customField1"  # 城市字段
-    if field_key in form_config.get("fields", {}):
-        field_info = form_config["fields"][field_key]
-        if "_embedded" in field_info and "allowedValues" in field_info["_embedded"]:
-            allowed_values = field_info["_embedded"]["allowedValues"]
-            # 提取城市选项
-            for value in allowed_values:
-                if isinstance(value, dict):
-                    city = {
-                        "id": value.get("id"),
-                        "name": value.get("value"),
-                        "href": f"/api/v3/custom_options/{value.get('id')}"
-                    }
-                    cities.append(city)
-            
-            log(f"成功获取 {len(cities)} 个城市选项")
-            return cities
-        elif "_links" in field_info and "allowedValues" in field_info["_links"]:
-            values = field_info["_links"]["allowedValues"]
-            for value in values:
-                if "href" in value and "title" in value:
-                    option_id = value["href"].split("/")[-1]
-                    city = {
-                        "id": option_id,
-                        "name": value["title"],
-                        "href": value["href"]
-                    }
-                    cities.append(city)
-            
-            log(f"从links中获取 {len(cities)} 个城市选项")
-            return cities
-    
-    log("无法从表单配置中获取城市选项")
-    return None
+    log(f"成功获取 {len(cities)} 个城市选项")
+    return cities
 
 def get_city_by_name(cities, city_name):
     """根据城市名称查找城市信息"""
@@ -494,6 +447,10 @@ def copy_tasks_to_cities(source_city_name="省厅", target_project_name=None, ta
 
 def create_task_for_city(project_id, task_data, city, dry_run=False, verbose=False):
     """为指定城市创建任务"""
+    # 获取城市字段ID
+    city_field_id = api_client.get_city_field_id()
+    city_field_key = f"customField{city_field_id}"
+    
     # 准备任务数据
     new_task_data = {
         "subject": task_data["subject"],
@@ -501,7 +458,7 @@ def create_task_for_city(project_id, task_data, city, dry_run=False, verbose=Fal
             "project": {
                 "href": f"/api/v3/projects/{project_id}"
             },
-            "customField1": {
+            city_field_key: {
                 "href": city["href"]
             }
         }
@@ -541,6 +498,10 @@ def create_task_for_city(project_id, task_data, city, dry_run=False, verbose=Fal
 
 def create_subtask_for_city(project_id, task_data, city, parent_id, dry_run=False, verbose=False):
     """为指定城市创建子任务"""
+    # 获取城市字段ID
+    city_field_id = api_client.get_city_field_id()
+    city_field_key = f"customField{city_field_id}"
+    
     # 准备任务数据
     new_task_data = {
         "subject": task_data["subject"],
@@ -548,7 +509,7 @@ def create_subtask_for_city(project_id, task_data, city, parent_id, dry_run=Fals
             "project": {
                 "href": f"/api/v3/projects/{project_id}"
             },
-            "customField1": {
+            city_field_key: {
                 "href": city["href"]
             },
             "parent": {

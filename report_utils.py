@@ -111,6 +111,13 @@ def cleanup_task_data(task_data):
         'children': []
     }
     
+    # 添加描述字段
+    if "description" in task_data:
+        if isinstance(task_data["description"], dict) and "raw" in task_data["description"]:
+            cleaned_data["description"] = task_data["description"]["raw"]
+        else:
+            cleaned_data["description"] = str(task_data["description"])
+    
     # 处理子任务
     if 'children' in task_data and task_data['children']:
         for child in task_data['children']:

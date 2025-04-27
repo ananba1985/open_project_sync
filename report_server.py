@@ -181,10 +181,38 @@ class ReportHandler(BaseHTTPRequestHandler):
             tasks_status = {}
             city_statistics = {}
             
-            # 获取省厅的任务作为模板
-            province_city = next((city for city in cities if city["name"] == "省厅"), None)
-            if not province_city:
-                queue_obj.put({"status": "error", "message": "找不到省厅城市"})
+            # 获取省厅的任务作为模板 - 增加错误处理和数据检查
+            try:
+                # 先确保所有城市对象都有name字段
+                for city in cities:
+                    if "name" not in city and "value" in city:
+                        city["name"] = city["value"]
+                
+                # 查找省厅城市
+                province_city = next((city for city in cities if city.get("name", "") == "省厅"), None)
+                
+                # 如果没找到省厅，尝试模糊匹配
+                if not province_city:
+                    province_city = next((city for city in cities if "省" in city.get("name", "")), None)
+                    if province_city:
+                        print(f"找到省相关城市作为省厅替代: {province_city.get('name', '')}")
+                
+                # 如果仍然没找到，使用第一个城市
+                if not province_city and cities:
+                    province_city = cities[0]
+                    print(f"使用第一个城市作为省厅替代: {province_city.get('name', '')}")
+                
+                if not province_city:
+                    error_msg = "找不到省厅城市且城市列表为空"
+                    print(error_msg)
+                    queue_obj.put({"status": "error", "message": error_msg})
+                    return
+                
+                print(f"使用省厅城市: {province_city.get('name', '')}")
+            except Exception as e:
+                error_msg = f"获取省厅城市出错: {str(e)}"
+                print(error_msg)
+                queue_obj.put({"status": "error", "message": error_msg})
                 return
             
             # 分析任务层级关系
@@ -883,6 +911,13 @@ class ReportHandler(BaseHTTPRequestHandler):
             "children": []
         }
         
+        # 添加描述字段
+        if "description" in task:
+            if isinstance(task["description"], dict) and "raw" in task["description"]:
+                task_tree["description"] = task["description"]["raw"]
+            else:
+                task_tree["description"] = str(task["description"])
+        
         # 添加子任务
         if task_id in tasks_tree:
             for child_id in tasks_tree[task_id]:
@@ -1200,32 +1235,73 @@ class ReportHandler(BaseHTTPRequestHandler):
 
     def is_task_belongs_to_city(self, task, city):
         """检查任务是否属于指定城市"""
-        if "_links" not in task or "customField1" not in task["_links"]:
+        # 获取城市字段ID
+        city_field_id = api_client.get_city_field_id()
+        city_field_key = f"customField{city_field_id}"
+        
+        # 调试信息，帮助追踪问题
+        task_id = task.get("id", "未知")
+        
+        # 检查是否有城市字段
+        if "_links" not in task or city_field_key not in task["_links"]:
             return False
-            
-        task_city = task["_links"]["customField1"]
-        city_href = city.get("href", f"/api/v3/custom_options/{city['id']}")
         
-        # 精确匹配城市的href
+        # 获取任务的城市信息
+        task_city = task["_links"][city_field_key]
+        
+        # 尝试多种方式获取城市ID和名称，以增强健壮性
+        city_id = city.get("id", "")
+        city_name = city.get("name", "")
+        if not city_name and "value" in city:
+            city_name = city.get("value", "")
+        
+        city_href = city.get("href", "")
+        if not city_href and city_id:
+            city_href = f"/api/v3/custom_options/{city_id}"
+        
+        # 打印调试信息
+        print(f"匹配城市: 任务ID={task_id}, 城市检查: {city_name}(ID={city_id}, href={city_href})")
+        print(f"任务城市数据: {task_city}")
+        
+        # 精确匹配城市的href (最准确的方法)
         if isinstance(task_city, dict) and "href" in task_city:
-            return task_city["href"] == city_href
-        elif isinstance(task_city, list):
-            return any(isinstance(link, dict) and "href" in link and link["href"] == city_href 
-                      for link in task_city)
+            is_match = task_city["href"] == city_href
+            if is_match:
+                print(f"通过href匹配: 任务={task_id}, 城市={city_name}")
+            return is_match
         
-        # 根据城市ID或名称匹配
-        city_id = city.get("id")
-        city_name = city.get("name")
+        # 如果是城市列表，检查是否包含目标城市
+        if isinstance(task_city, list):
+            for city_entry in task_city:
+                if isinstance(city_entry, dict):
+                    # 匹配href
+                    if "href" in city_entry and city_entry["href"] == city_href:
+                        print(f"通过列表href匹配: 任务={task_id}, 城市={city_name}")
+                        return True
+                    
+                    # 匹配名称
+                    for field in ["title", "name", "value"]:
+                        if field in city_entry and city_entry[field] == city_name:
+                            print(f"通过列表{field}匹配: 任务={task_id}, 城市={city_name}")
+                            return True
+            
+            # 如果以上匹配都失败，则返回False
+            return False
         
+        # 单个城市对象，通过各种字段尝试匹配
         if isinstance(task_city, dict):
-            return (
-                task_city.get("id") == city_id or 
-                task_city.get("title") == city_name or 
-                task_city.get("name") == city_name or
-                task_city.get("value") == city_name
-            )
+            # 尝试通过不同字段匹配
+            for field in ["title", "name", "value"]:
+                if field in task_city and task_city[field] == city_name:
+                    print(f"通过{field}匹配: 任务={task_id}, 城市={city_name}")
+                    return True
+            
+            # 尝试匹配ID
+            if "id" in task_city and task_city["id"] == city_id:
+                print(f"通过ID匹配: 任务={task_id}, 城市={city_name}")
+                return True
         
-        # 其他情况
+        # 如果所有匹配方式都失败，则返回False
         return False
 
     def get_cities(self, project_id, progress_id=None, base_percent=0):
@@ -1233,23 +1309,90 @@ class ReportHandler(BaseHTTPRequestHandler):
         if progress_id and progress_id in progress_queues:
             progress_queues[progress_id].put({"status": "progress", "message": "获取城市列表...", "percent": base_percent + 2})
         
-        try:
-            # 直接使用api_client的get_cities方法
-            cities = api_client.get_cities()
-            
-            if not cities:
-                error_msg = "城市列表为空"
-                print(error_msg)
-                raise Exception(error_msg)
-            
-            if progress_id and progress_id in progress_queues and cities:
-                progress_queues[progress_id].put({"status": "progress", "message": f"已获取{len(cities)}个城市", "percent": base_percent + 5})
+        max_retries = 2
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # 直接使用api_client的get_cities方法
+                if retry_count > 0:
+                    # 在第一次失败后尝试刷新API连接
+                    print(f"尝试重置API连接（尝试 {retry_count+1}/{max_retries}）")
+                    if progress_id and progress_id in progress_queues:
+                        progress_queues[progress_id].put({"status": "progress", "message": "重置API连接...", "percent": base_percent + 2})
+                    api_client.update_credentials(api_client.api_url, api_client.api_token)
                 
-            return cities
-        except Exception as e:
-            error_msg = f"获取城市列表失败: {str(e)}"
-            print(error_msg)
-            raise Exception(error_msg)
+                cities = api_client.get_cities()
+                
+                if not cities:
+                    error_msg = f"城市列表为空 (尝试 {retry_count+1}/{max_retries})"
+                    print(error_msg)
+                    
+                    if retry_count < max_retries - 1:
+                        retry_count += 1
+                        if progress_id and progress_id in progress_queues:
+                            progress_queues[progress_id].put({"status": "progress", "message": f"城市列表为空，正在重试 ({retry_count}/{max_retries})...", "percent": base_percent + 3})
+                        time.sleep(2)  # 等待两秒后重试
+                        continue
+                    else:
+                        raise Exception(error_msg)
+                
+                # 验证城市对象数据完整性
+                valid_cities = []
+                for city in cities:
+                    # 确保城市对象有name属性
+                    if "name" not in city:
+                        if "value" in city:
+                            city["name"] = city["value"]
+                        elif "title" in city:
+                            city["name"] = city["title"]
+                        else:
+                            print(f"警告: 城市对象缺少name字段: {city}")
+                            continue
+                    valid_cities.append(city)
+                
+                if not valid_cities:
+                    error_msg = f"没有有效的城市数据 (尝试 {retry_count+1}/{max_retries})"
+                    print(error_msg)
+                    if retry_count < max_retries - 1:
+                        retry_count += 1
+                        if progress_id and progress_id in progress_queues:
+                            progress_queues[progress_id].put({"status": "progress", "message": f"没有有效的城市数据，正在重试 ({retry_count}/{max_retries})...", "percent": base_percent + 3})
+                        time.sleep(2)
+                        continue
+                    else:
+                        raise Exception(error_msg)
+                
+                if progress_id and progress_id in progress_queues and valid_cities:
+                    progress_queues[progress_id].put({"status": "progress", "message": f"已获取{len(valid_cities)}个城市", "percent": base_percent + 5})
+                
+                # 成功获取城市列表
+                print(f"成功获取 {len(valid_cities)} 个城市")
+                
+                # 打印城市列表供调试
+                print("城市列表：")
+                for city in valid_cities:
+                    print(f"  - {city.get('name', 'Unknown')} (ID: {city.get('id', 'Unknown')})")
+                
+                return valid_cities
+                
+            except Exception as e:
+                error_msg = f"获取城市列表失败 (尝试 {retry_count+1}/{max_retries}): {str(e)}"
+                print(error_msg)
+                
+                if retry_count < max_retries - 1:
+                    retry_count += 1
+                    if progress_id and progress_id in progress_queues:
+                        progress_queues[progress_id].put({"status": "progress", "message": f"获取城市列表失败，正在重试 ({retry_count}/{max_retries})...", "percent": base_percent + 3})
+                    time.sleep(2)  # 等待两秒后重试
+                else:
+                    # 最后一次尝试后仍然失败
+                    final_error_msg = f"获取城市列表失败: {str(e)}\n请确认：\n1. API服务器是否正常运行\n2. API凭证是否有效\n3. 是否有城市自定义字段并已配置城市数据"
+                    print(final_error_msg)
+                    raise Exception(final_error_msg)
+        
+        # 不应该执行到这里，但为安全起见
+        raise Exception("获取城市列表失败：所有重试均已失败")
 
     def generate_html(self, report_data, show_task_ids=False):
         if "error" in report_data:
@@ -1673,6 +1816,46 @@ class ReportHandler(BaseHTTPRequestHandler):
                     left: 0;
                     z-index: 1;
                 }}
+                
+                /* 自定义悬浮提示样式 */
+                .report-table td[title] {{
+                    position: relative;
+                }}
+                
+                .report-table td[title]:hover::before {{
+                    content: attr(title);
+                    position: absolute;
+                    bottom: 100%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    background-color: rgba(0,0,0,0.8);
+                    color: white;
+                    padding: 8px 12px;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    font-weight: normal;
+                    white-space: pre-wrap;
+                    max-width: 300px;
+                    min-width: 200px;
+                    z-index: 100;
+                    text-align: left;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    line-height: 1.4;
+                    pointer-events: none;
+                }}
+                
+                .report-table td[title]:hover::after {{
+                    content: '';
+                    position: absolute;
+                    top: -5px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    border-width: 5px;
+                    border-style: solid;
+                    border-color: rgba(0,0,0,0.8) transparent transparent transparent;
+                    z-index: 100;
+                    pointer-events: none;
+                }}
             </style>
             <link rel="icon" href="data:,">
         </head>
@@ -1893,11 +2076,26 @@ class ReportHandler(BaseHTTPRequestHandler):
                         status_label = self.get_status_label(status_title)
                         status_class = self.get_status_class(status_label)
                         
+                        # 获取任务描述
+                        task_description = ""
+                        if "description" in city_task:
+                            if isinstance(city_task["description"], dict) and "raw" in city_task["description"]:
+                                task_description = city_task["description"]["raw"]
+                            else:
+                                task_description = str(city_task["description"])
+                            # 处理描述文本，清理HTML标签等
+                            task_description = task_description.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+                        
+                        # 构建悬浮提示内容
+                        tooltip_content = f"ID:{city_task_id} - {status_label}"
+                        if task_description:
+                            tooltip_content = f"{tooltip_content}\n\n{task_description}"
+                        
                         # 根据参数决定是否显示任务ID
                         if show_task_ids:
-                            html += f'<td class="{status_class}" title="ID:{city_task_id} - {status_label}"><div class="status-cell">ID:{city_task_id} - {status_label}</div></td>'
+                            html += f'<td class="{status_class}" title="{tooltip_content}"><div class="status-cell">ID:{city_task_id} - {status_label}</div></td>'
                         else:
-                            html += f'<td class="{status_class}" title="{status_label}"><div class="status-cell">{status_label}</div></td>'
+                            html += f'<td class="{status_class}" title="{tooltip_content}"><div class="status-cell">{status_label}</div></td>'
                     else:
                         # 未找到对应城市的任务，使用省厅状态计算的状态
                         parent_status = self.get_task_status_for_city(template_id, city_name, report_data)
@@ -1932,10 +2130,25 @@ class ReportHandler(BaseHTTPRequestHandler):
                             status_label = self.get_status_label(status_title)
                             status_class = self.get_status_class(status_label)
                             
+                            # 获取任务描述
+                            task_description = ""
+                            if "description" in city_child_task:
+                                if isinstance(city_child_task["description"], dict) and "raw" in city_child_task["description"]:
+                                    task_description = city_child_task["description"]["raw"]
+                                else:
+                                    task_description = str(city_child_task["description"])
+                                # 处理描述文本，清理HTML标签等
+                                task_description = task_description.replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+                            
+                            # 构建悬浮提示内容
+                            tooltip_content = f"ID:{city_child_id} - {status_label}"
+                            if task_description:
+                                tooltip_content = f"{tooltip_content}\n\n{task_description}"
+                            
                             if show_task_ids:
-                                html += f'<td class="{status_class}" title="ID:{city_child_id} - {status_label}"><div class="status-cell">ID:{city_child_id} - {status_label}</div></td>'
+                                html += f'<td class="{status_class}" title="{tooltip_content}"><div class="status-cell">ID:{city_child_id} - {status_label}</div></td>'
                             else:
-                                html += f'<td class="{status_class}" title="{status_label}"><div class="status-cell">{status_label}</div></td>'
+                                html += f'<td class="{status_class}" title="{tooltip_content}"><div class="status-cell">{status_label}</div></td>'
                         else:
                             # 未找到对应城市的任务，使用省厅状态计算的状态
                             child_status = self.get_task_status_for_city(template_id, city_name, report_data)
