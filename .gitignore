@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+
+# 配置文件可能包含敏感信息，谨慎处理
+# op_config.json
+
+# 运行时生成的文件
+*.log
+*.pyc
+*.pyo
+.coverage
+htmlcov/
+.pytest_cache/
