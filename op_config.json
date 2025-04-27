@@ -1,4 +1,4 @@
 {
-  "api_url": "",
-  "api_token": ""
+  "api_url": "http://localhost:8080/",
+  "api_token": "984614b4506a53c5768b2518d7082a87a6657bf07a075dff6f4f1ce8f4cadd32"
 }

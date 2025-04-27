@@ -58,6 +58,18 @@ class ExportThread(QThread):
             if custom_fields:
                 export_data["custom_fields"] = custom_fields
             
+            # 获取自定义字段选项
+            self.progress_update.emit(17, "正在获取自定义字段选项...")
+            custom_field_options = {}
+            for field in custom_fields:
+                field_id = field.get("id")
+                if field_id:
+                    options = api_client.get_custom_field_options(field_id)
+                    if options:
+                        custom_field_options[field_id] = options
+            
+            export_data["custom_field_options"] = custom_field_options
+            
             # 获取状态和类型
             self.progress_update.emit(20, "正在获取状态和类型数据...")
             statuses = api_client.get_statuses()
@@ -72,6 +84,7 @@ class ExportThread(QThread):
             if self.include_work_packages:
                 self.progress_update.emit(30, "正在获取工作包数据...")
                 
+                # 使用与LoadWorkPackagesThread相同的流程获取全量工作包
                 # 首先获取项目测试工作包以确定总数
                 self.progress_update.emit(32, "正在确定工作包总数...")
                 page_size = 50  # 初始较小的页面大小
@@ -97,51 +110,176 @@ class ExportThread(QThread):
                 
                 if work_packages:
                     self.progress_update.emit(45, f"成功获取 {len(work_packages)} 个工作包")
-                    export_data["work_packages"] = work_packages
+                    
+                    # 保存工作包ID以便后续查找
+                    work_package_ids = {wp.get("id") for wp in work_packages if "id" in wp}
+                    
+                    # 检查是否有子任务引用
+                    self.progress_update.emit(50, "正在检查子任务引用...")
+                    referenced_ids = set()
+                    
+                    # 收集所有子任务和父任务ID
+                    for wp in work_packages:
+                        # 检查子任务
+                        if "_links" in wp and "children" in wp["_links"]:
+                            children = wp["_links"]["children"]
+                            if isinstance(children, list):
+                                for child in children:
+                                    if isinstance(child, dict) and "href" in child:
+                                        # 从href提取ID
+                                        try:
+                                            href = child["href"]
+                                            child_id = int(href.split("/")[-1])
+                                            referenced_ids.add(child_id)
+                                        except (ValueError, IndexError):
+                                            pass
+                                            
+                        # 检查父任务
+                        if "_links" in wp and "parent" in wp["_links"]:
+                            parent = wp["_links"]["parent"]
+                            if isinstance(parent, dict) and "href" in parent:
+                                href = parent["href"]
+                                if href:  # 确保href不是None
+                                    try:
+                                        parent_id = int(href.split("/")[-1])
+                                        referenced_ids.add(parent_id)
+                                    except (ValueError, IndexError):
+                                        pass
+                    
+                    # 找出缺失的引用任务
+                    missing_referenced_ids = [id for id in referenced_ids if id not in work_package_ids]
+                    if missing_referenced_ids:
+                        missing_count = len(missing_referenced_ids)
+                        self.progress_update.emit(55, f"正在获取 {missing_count} 个引用任务...")
+                        
+                        # 并行获取被引用的工作包详情
+                        referenced_details = self.get_work_packages_details_parallel(missing_referenced_ids)
+                        
+                        # 添加获取到的工作包
+                        added_count = 0
+                        for wp_id, wp_data in referenced_details.items():
+                            if wp_data:
+                                work_packages.append(wp_data)
+                                work_package_ids.add(wp_id)
+                                added_count += 1
+                        
+                        self.progress_update.emit(60, f"已添加 {added_count} 个引用任务")
+                    
+                    # 检查工作包状态完整性
+                    self.progress_update.emit(65, "正在验证工作包状态...")
+                    packages_without_status = []
+                    
+                    for wp in work_packages:
+                        wp_id = wp.get("id", "未知")
+                        has_complete_status = False
+                        
+                        if "_links" in wp and "status" in wp["_links"]:
+                            status_link = wp["_links"]["status"]
+                            if isinstance(status_link, dict) and "title" in status_link and "href" in status_link:
+                                has_complete_status = True
+                        
+                        if not has_complete_status:
+                            packages_without_status.append(wp_id)
+                    
+                    # 获取缺少状态的工作包详细信息
+                    if packages_without_status:
+                        missing_count = len(packages_without_status)
+                        self.progress_update.emit(70, f"正在获取 {missing_count} 个缺少状态的工作包...")
+                        
+                        # 并行获取缺少状态的工作包详情
+                        detailed_packages = self.get_work_packages_details_parallel(packages_without_status)
+                        
+                        # 更新工作包信息
+                        updated_count = 0
+                        for wp_id, detailed_wp in detailed_packages.items():
+                            if detailed_wp:
+                                # 找到原来的工作包并更新，如果不存在则添加
+                                updated = False
+                                for i, wp in enumerate(work_packages):
+                                    if wp.get("id") == wp_id:
+                                        work_packages[i] = detailed_wp
+                                        updated = True
+                                        updated_count += 1
+                                        break
+                                
+                                if not updated:
+                                    # 如果未找到现有的工作包，则添加新的
+                                    work_packages.append(detailed_wp)
+                                    updated_count += 1
+                        
+                        self.progress_update.emit(75, f"已更新 {updated_count} 个工作包状态")
+                    
+                    # 确保没有重复的工作包
+                    unique_wps = {}
+                    for wp in work_packages:
+                        wp_id = wp.get("id")
+                        if wp_id is not None:
+                            unique_wps[wp_id] = wp
+                    
+                    # 转换回列表
+                    work_packages_final = list(unique_wps.values())
+                    self.progress_update.emit(80, f"整理完成，共 {len(work_packages_final)} 个工作包")
+                    
+                    # 添加到导出数据
+                    export_data["work_packages"] = work_packages_final
+                else:
+                    self.progress_update.emit(80, "没有找到工作包")
             
-            # 写入导出文件
-            self.progress_update.emit(90, "正在写入导出文件...")
+            # 将数据写入文件
+            self.progress_update.emit(90, "正在写入文件...")
             with open(self.file_path, 'w', encoding='utf-8') as f:
                 json.dump(export_data, f, ensure_ascii=False, indent=2)
             
-            self.progress_update.emit(100, "导出完成!")
+            self.progress_update.emit(100, "导出完成")
             self.export_completed.emit(self.file_path)
             
         except Exception as e:
-            error_msg = f"导出过程中出错: {str(e)}\n{traceback.format_exc()}"
+            error_msg = f"导出失败: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
             self.error_occurred.emit(error_msg)
-
+    
     def get_work_packages_details_parallel(self, work_package_ids, max_workers=10):
-        """并行获取多个工作包的详细信息"""
-        results = {}
+        """并行获取多个工作包的详细信息
         
-        def fetch_wp_details(wp_id):
-            try:
-                wp_details = api_client.get_work_package(wp_id)
-                return wp_id, wp_details
-            except Exception as e:
-                print(f"获取工作包 {wp_id} 详情出错: {str(e)}")
-                return wp_id, None
+        Args:
+            work_package_ids: 工作包ID列表
+            max_workers: 最大并行线程数
+            
+        Returns:
+            dict: 以工作包ID为键，工作包详情为值的字典
+        """
+        if not work_package_ids:
+            return {}
+            
+        results = {}
         
         # 使用线程池并行获取
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
-            future_to_id = {executor.submit(fetch_wp_details, wp_id): wp_id for wp_id in work_package_ids}
+            future_to_id = {
+                executor.submit(api_client.get_work_package, wp_id): wp_id 
+                for wp_id in work_package_ids
+            }
             
             # 处理完成的任务
-            for i, future in enumerate(concurrent.futures.as_completed(future_to_id)):
+            completed = 0
+            total_count = len(work_package_ids)
+            for future in concurrent.futures.as_completed(future_to_id):
                 wp_id = future_to_id[future]
+                completed += 1
+                
                 try:
-                    result_id, wp_details = future.result()
-                    results[result_id] = wp_details
-                    
-                    # 更新进度
-                    progress = int(55 + (i / len(work_package_ids)) * 5)  # 55-60% 的进度区间
-                    self.progress_update.emit(progress, f"已获取 {i+1}/{len(work_package_ids)} 个工作包详情")
+                    data = future.result()
+                    results[wp_id] = data
                 except Exception as e:
-                    print(f"处理工作包 {wp_id} 结果时出错: {str(e)}")
+                    results[wp_id] = None
+                
+                # 更新进度
+                if completed % 5 == 0 or completed == total_count:
+                    self.progress_update.emit(55 + int(15 * completed / total_count), f"已处理 {completed}/{total_count} 个工作包")
         
         return results
+
 
 class ImportThread(QThread):
     """项目导入线程"""
@@ -157,415 +295,383 @@ class ImportThread(QThread):
     
     def run(self):
         try:
-            self.progress_update.emit(5, "正在读取导入文件...")
+            self.progress_update.emit(10, f"正在读取文件 {self.file_path}")
             
-            # 读取导入文件
+            # 读取文件
             with open(self.file_path, 'r', encoding='utf-8') as f:
-                import_data = json.load(f)
+                project_data = json.load(f)
             
-            # 检查数据版本
-            export_version = import_data.get("export_version", "未知")
-            self.progress_update.emit(10, f"文件版本: {export_version}")
+            self.progress_update.emit(20, "文件已加载，准备导入项目")
             
-            # 准备导入参数
+            # 创建参数字典
             params = {
-                "project_data": import_data,
-                "new_name": self.project_name,
-                "import_options": {
-                    "force_relations": self.force_relations
-                }
+                'project_data': project_data,
+                'new_name': self.project_name,
+                'force_relations': self.force_relations
             }
             
-            # 开始导入
-            self.progress_update.emit(15, "开始导入项目...")
-            self.import_project_with_data(params)
+            # 导入项目
+            new_project_id = self.import_project_with_data(params)
             
+            if new_project_id:
+                self.import_completed.emit(new_project_id)
+                self.progress_update.emit(100, f"项目导入成功，ID: {new_project_id}")
+            else:
+                error_msg = "导入失败，未能获取新项目ID"
+                self.progress_update.emit(0, error_msg)
+                self.error_occurred.emit(error_msg)
+                
         except Exception as e:
-            error_msg = f"导入过程中出错: {str(e)}\n{traceback.format_exc()}"
-            self.error_occurred.emit(error_msg)
-    
+            import traceback
+            error_details = traceback.format_exc()
+            error_msg = f"导入过程出错: {str(e)}"
+            self.progress_update.emit(0, error_msg)
+            self.error_occurred.emit(f"{error_msg}\n\n详细错误:\n{error_details}")
+
     def import_project_with_data(self, params):
-        """执行项目导入"""
-        project_data = params.get("project_data", {})
-        new_name = params.get("new_name")
-        import_options = params.get("import_options", {})
+        """
+        执行项目导入
+        
+        Args:
+            params: 导入参数
+                - project_data: 项目数据
+                - new_name: 新项目名称
+                - force_relations: 是否强制处理关系
+        
+        Returns:
+            创建的项目ID
+        """
+        project_data = params.get('project_data')
+        new_name = params.get('new_name')
+        force_relations = params.get('force_relations', False)
         
         if not project_data:
-            self.error_occurred.emit("导入数据为空")
-            return
-            
-        # 获取原始项目信息
-        project = project_data.get("project", {})
-        if not project:
-            self.error_occurred.emit("项目数据为空")
-            return
-            
-        self.progress_update.emit(20, f"正在导入项目: {new_name or project.get('name', '未命名项目')}")
+            self.error_occurred.emit("无效的项目数据")
+            return None
         
-        # 进度回调函数，用于接收导入过程中的进度更新
+        # 收集类型映射
+        type_mapping = {}
+        
+        # 收集状态映射
+        status_mapping = {}
+        
+        # 获取现有类型和状态
+        try:
+            # 获取类型
+            types = api_client.get_types()
+            if types:
+                for t in types:
+                    type_name = t.get("name", "")
+                    type_id = t.get("id")
+                    if type_name and type_id:
+                        type_mapping[type_name] = type_id
+            
+            # 获取状态
+            statuses = api_client.get_statuses()
+            if statuses:
+                for s in statuses:
+                    status_name = s.get("name", "")
+                    status_id = s.get("id")
+                    if status_name and status_id:
+                        status_mapping[status_name] = status_id
+                        
+        except Exception as e:
+            self.progress_update.emit(20, f"获取类型和状态出错: {str(e)}")
+        
+        # 进度回调函数
         def progress_callback(stage, current, total, message):
             # 根据阶段计算进度百分比
             # 30-70% 用于创建工作包
             # 70-100% 用于处理关系
-            progress = 0
-            if stage == "create_packages":
-                if total > 0:
-                    progress = 30 + (current / total) * 40
-                else:
-                    progress = 50
-            elif stage == "create_relations":
-                if total > 0:
-                    progress = 70 + (current / total) * 30
-                else:
-                    progress = 85
-            elif stage == "finalize":
-                progress = 95
-                
-            self.progress_update.emit(int(progress), message)
             
-        # 调用API客户端导入项目
-        try:
-            result = api_client.import_project(
-                project_data, 
-                new_name=new_name, 
-                import_options=import_options,
-                progress_callback=progress_callback
-            )
-            
-            if result and "id" in result:
-                project_id = result["id"]
-                self.progress_update.emit(100, f"导入完成! 项目ID: {project_id}")
-                self.import_completed.emit(project_id)
+            if stage == "创建项目":
+                progress = 30 * (current / total)
+            elif stage == "创建工作包":
+                progress = 30 + 40 * (current / total)
+            elif stage == "处理关系":
+                progress = 70 + 30 * (current / total)
             else:
-                error = result.get("error", "未知错误")
-                self.error_occurred.emit(f"导入失败: {error}")
-                
-        except Exception as e:
-            self.error_occurred.emit(f"导入出错: {str(e)}")
+                progress = 20  # 默认20%的进度
+            
+            # 发送进度更新
+            self.progress_update.emit(int(progress), message)
+        
+        # 创建导入选项
+        import_options = {
+            "progress_callback": progress_callback,
+            "type_mapping": type_mapping,
+            "status_mapping": status_mapping,
+            "force_relations": force_relations  # 添加强制处理关系选项
+        }
+        
+        # 执行导入
+        new_project_id = api_client.import_project(project_data, new_name, import_options)
+        
+        # 确保返回的是字符串类型
+        return str(new_project_id) if new_project_id else None
+
 
 class ExportImportWidget(QWidget):
-    """项目导出导入界面"""
+    """项目导出/导入界面"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setup_ui()
         self.current_project = None
+        self.setup_ui()
     
     def setup_ui(self):
-        layout = QVBoxLayout()
+        main_layout = QVBoxLayout()
         
         # 标题
-        title_label = QLabel("项目导出导入")
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
-        layout.addWidget(title_label)
+        title_label = QLabel("项目导出与导入")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        main_layout.addWidget(title_label)
         
-        # 创建标签页
-        tabs = QTabWidget()
-        
-        # 导出标签页
-        export_tab = QWidget()
+        # 创建导出组
+        export_group = QGroupBox("导出项目")
         export_layout = QVBoxLayout()
         
-        # 导出 - 项目选择
-        export_project_group = QGroupBox("选择要导出的项目")
-        export_project_layout = QFormLayout()
-        self.export_project_combo = QComboBox()
-        self.export_project_combo.setMinimumWidth(300)
-        self.export_refresh_btn = QPushButton("刷新")
+        # 导出选项
+        export_options_form = QFormLayout()
         
-        project_layout = QHBoxLayout()
-        project_layout.addWidget(self.export_project_combo)
-        project_layout.addWidget(self.export_refresh_btn)
+        # 选择项目下拉框
+        self.project_combo = QComboBox()
+        self.project_combo.setMinimumWidth(300)
+        export_options_form.addRow("选择项目:", self.project_combo)
         
-        export_project_layout.addRow("项目:", project_layout)
-        export_project_group.setLayout(export_project_layout)
-        export_layout.addWidget(export_project_group)
+        # 导出选项复选框
+        self.include_wp_checkbox = QCheckBox("包含工作包")
+        self.include_wp_checkbox.setChecked(True)
+        self.include_relations_checkbox = QCheckBox("包含关系")
+        self.include_relations_checkbox.setChecked(True)
+        self.include_comments_checkbox = QCheckBox("包含评论")
+        self.include_comments_checkbox.setChecked(True)
+        self.include_statuses_checkbox = QCheckBox("包含状态")
+        self.include_statuses_checkbox.setChecked(True)
         
-        # 导出 - 导出选项
-        export_options_group = QGroupBox("导出选项")
-        export_options_layout = QVBoxLayout()
+        export_options_layout = QHBoxLayout()
+        export_options_layout.addWidget(self.include_wp_checkbox)
+        export_options_layout.addWidget(self.include_relations_checkbox)
+        export_options_layout.addWidget(self.include_comments_checkbox)
+        export_options_layout.addWidget(self.include_statuses_checkbox)
+        export_options_form.addRow("导出选项:", export_options_layout)
         
-        self.include_wp_check = QCheckBox("包含工作包")
-        self.include_wp_check.setChecked(True)
-        self.include_relations_check = QCheckBox("包含工作包关系")
-        self.include_relations_check.setChecked(True)
-        self.include_comments_check = QCheckBox("包含评论")
-        self.include_comments_check.setChecked(True)
-        self.include_statuses_check = QCheckBox("包含状态")
-        self.include_statuses_check.setChecked(True)
+        export_layout.addLayout(export_options_form)
         
-        export_options_layout.addWidget(self.include_wp_check)
-        export_options_layout.addWidget(self.include_relations_check)
-        export_options_layout.addWidget(self.include_comments_check)
-        export_options_layout.addWidget(self.include_statuses_check)
-        
-        export_options_group.setLayout(export_options_layout)
-        export_layout.addWidget(export_options_group)
-        
-        # 导出 - 导出按钮
+        # 导出按钮
         self.export_btn = QPushButton("导出项目")
-        self.export_btn.setMinimumHeight(40)
-        export_layout.addWidget(self.export_btn)
+        self.export_btn.setMinimumWidth(120)
+        export_btn_layout = QHBoxLayout()
+        export_btn_layout.addStretch()
+        export_btn_layout.addWidget(self.export_btn)
+        export_layout.addLayout(export_btn_layout)
         
-        # 添加进度条
-        self.export_progress = QProgressBar()
-        self.export_progress.setVisible(False)
-        export_layout.addWidget(self.export_progress)
+        export_group.setLayout(export_layout)
+        main_layout.addWidget(export_group)
         
-        # 导出状态标签
-        self.export_status_label = QLabel("")
-        export_layout.addWidget(self.export_status_label)
-        
-        export_layout.addStretch()
-        export_tab.setLayout(export_layout)
-        
-        # 导入标签页
-        import_tab = QWidget()
+        # 创建导入组
+        import_group = QGroupBox("导入项目")
         import_layout = QVBoxLayout()
         
-        # 导入 - 文件选择
-        import_file_group = QGroupBox("选择要导入的文件")
-        import_file_layout = QHBoxLayout()
-        self.import_file_path = QLineEdit()
-        self.import_file_path.setReadOnly(True)
-        self.import_browse_btn = QPushButton("浏览...")
+        # 导入选项
+        import_options_form = QFormLayout()
         
-        import_file_layout.addWidget(self.import_file_path)
-        import_file_layout.addWidget(self.import_browse_btn)
-        import_file_group.setLayout(import_file_layout)
-        import_layout.addWidget(import_file_group)
+        # 项目名称
+        self.import_name_edit = QLineEdit()
+        self.import_name_edit.setPlaceholderText("留空将使用原项目名称并添加'(导入)'后缀")
+        self.import_name_edit.setMinimumWidth(300)
+        import_options_form.addRow("新项目名称:", self.import_name_edit)
         
-        # 导入 - 项目名称
-        import_name_group = QGroupBox("项目名称")
-        import_name_layout = QFormLayout()
-        self.import_project_name = QLineEdit()
-        self.import_project_name.setPlaceholderText("留空使用原始项目名称")
-        import_name_layout.addRow("新项目名称:", self.import_project_name)
-        import_name_group.setLayout(import_name_layout)
-        import_layout.addWidget(import_name_group)
+        # 强制处理关系选项
+        force_relations_layout = QHBoxLayout()
+        self.force_relations_checkbox = QCheckBox("强制处理关系 (解决冲突和循环依赖)")
+        self.force_relations_checkbox.setToolTip("启用此选项可以尝试强制创建关系，处理冲突和循环依赖问题")
+        force_relations_layout.addWidget(self.force_relations_checkbox)
+        import_options_form.addRow("强制处理关系:", force_relations_layout)
         
-        # 导入 - 导入选项
-        import_options_group = QGroupBox("导入选项")
-        import_options_layout = QVBoxLayout()
-        self.force_relations_check = QCheckBox("强制创建关系（即使引用的工作包不存在）")
-        import_options_layout.addWidget(self.force_relations_check)
-        import_options_group.setLayout(import_options_layout)
-        import_layout.addWidget(import_options_group)
+        import_layout.addLayout(import_options_form)
         
-        # 导入 - 导入按钮
+        # 导入按钮
         self.import_btn = QPushButton("导入项目")
-        self.import_btn.setMinimumHeight(40)
-        import_layout.addWidget(self.import_btn)
+        self.import_btn.setMinimumWidth(120)
+        import_btn_layout = QHBoxLayout()
+        import_btn_layout.addStretch()
+        import_btn_layout.addWidget(self.import_btn)
+        import_layout.addLayout(import_btn_layout)
         
-        # 添加进度条
-        self.import_progress = QProgressBar()
-        self.import_progress.setVisible(False)
-        import_layout.addWidget(self.import_progress)
+        import_group.setLayout(import_layout)
+        main_layout.addWidget(import_group)
         
-        # 导入状态标签
-        self.import_status_label = QLabel("")
-        import_layout.addWidget(self.import_status_label)
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        main_layout.addWidget(self.progress_bar)
         
-        import_layout.addStretch()
-        import_tab.setLayout(import_layout)
+        # 状态标签
+        self.status_label = QLabel("")
+        main_layout.addWidget(self.status_label)
         
-        # 添加标签页
-        tabs.addTab(export_tab, "导出项目")
-        tabs.addTab(import_tab, "导入项目")
-        
-        layout.addWidget(tabs)
-        self.setLayout(layout)
+        main_layout.addStretch()
+        self.setLayout(main_layout)
         
         # 连接信号
-        self.export_refresh_btn.clicked.connect(self.load_projects)
         self.export_btn.clicked.connect(self.export_project)
-        self.import_browse_btn.clicked.connect(self.browse_import_file)
         self.import_btn.clicked.connect(self.import_project)
-    
+        
     def load_projects(self):
-        """加载项目列表"""
-        self.export_project_combo.clear()
-        self.export_status_label.setText("正在加载项目列表...")
+        """加载项目列表到下拉框"""
+        self.project_combo.clear()
         
-        # 获取项目列表
-        projects = api_client.get_projects(force_refresh=True)
-        
-        if projects:
-            for project in projects:
-                self.export_project_combo.addItem(project.get("name", "未命名项目"), project)
+        try:
+            projects = api_client.get_projects()
+            if projects:
+                for project in projects:
+                    self.project_combo.addItem(project.get("name", "Unknown"), project)
+                
+                self.status_label.setText(f"已加载 {len(projects)} 个项目")
+            else:
+                self.status_label.setText("未找到项目")
+        except Exception as e:
+            self.status_label.setText(f"加载项目失败: {str(e)}")
             
-            self.export_status_label.setText(f"已加载 {len(projects)} 个项目")
-        else:
-            self.export_status_label.setText("未找到项目或加载失败")
-    
     def set_current_project(self, project):
-        """设置当前选中的项目"""
+        """设置当前项目"""
         self.current_project = project
         
-        # 如果项目列表为空，加载项目
-        if self.export_project_combo.count() == 0:
-            self.load_projects()
-            return
-            
-        # 如果有指定项目，选中它
+        # 如果项目有效，则在下拉框中选择它
         if project:
-            for i in range(self.export_project_combo.count()):
-                item_data = self.export_project_combo.itemData(i)
-                if item_data and item_data.get("id") == project.get("id"):
-                    self.export_project_combo.setCurrentIndex(i)
-                    break
+            # 查找项目在下拉框中的索引
+            project_id = project.get("id")
+            if project_id:
+                for i in range(self.project_combo.count()):
+                    item_data = self.project_combo.itemData(i)
+                    if item_data and item_data.get("id") == project_id:
+                        self.project_combo.setCurrentIndex(i)
+                        break
     
     def update_project_list(self, projects):
-        """更新项目列表（由外部调用）"""
+        """直接更新项目列表
+        
+        Args:
+            projects: 项目列表数据
+        """
         if not projects:
             return
             
-        self.export_project_combo.clear()
+        self.project_combo.clear()
         
         for project in projects:
-            self.export_project_combo.addItem(project.get("name", "未命名项目"), project)
-            
-        self.export_status_label.setText(f"已加载 {len(projects)} 个项目")
+            self.project_combo.addItem(project.get("name", "Unknown"), project)
         
-        # 如果有当前项目，尝试重新选中
-        if self.current_project:
-            self.set_current_project(self.current_project)
-    
-    def browse_import_file(self):
-        """浏览要导入的文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择导入文件", "", "JSON文件 (*.json)"
-        )
-        
-        if file_path:
-            self.import_file_path.setText(file_path)
-            
-            # 尝试从文件名生成项目名称建议
-            file_name = os.path.basename(file_path)
-            name_suggestion = os.path.splitext(file_name)[0]
-            
-            # 如果文件名是合理的项目名，填入建议
-            if name_suggestion and name_suggestion.lower() != "export" and len(name_suggestion) > 3:
-                self.import_project_name.setText(name_suggestion)
-    
+        self.status_label.setText(f"已加载 {len(projects)} 个项目")
+                
     def export_project(self):
         """导出项目"""
-        # 获取选中的项目
-        current_index = self.export_project_combo.currentIndex()
+        # 获取选择的项目
+        current_index = self.project_combo.currentIndex()
         if current_index < 0:
-            QMessageBox.warning(self, "未选择项目", "请选择要导出的项目")
+            QMessageBox.warning(self, "导出失败", "请选择要导出的项目")
             return
-            
-        project = self.export_project_combo.itemData(current_index)
-        if not project:
-            QMessageBox.warning(self, "项目数据缺失", "无法获取项目数据")
-            return
-            
-        project_id = project.get("id")
-        project_name = project.get("name", "未命名项目")
         
-        if not project_id:
-            QMessageBox.warning(self, "项目ID缺失", "无法获取项目ID")
+        selected_project = self.project_combo.itemData(current_index)
+        if not selected_project:
+            QMessageBox.warning(self, "导出失败", "无效的项目选择")
             return
-            
-        # 获取导出选项
-        include_wp = self.include_wp_check.isChecked()
-        include_relations = self.include_relations_check.isChecked()
-        include_comments = self.include_comments_check.isChecked()
-        include_statuses = self.include_statuses_check.isChecked()
+        
+        project_id = selected_project.get("id")
+        project_name = selected_project.get("name", "Unknown")
         
         # 选择保存文件
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "保存导出文件", f"{project_name}_export.json", "JSON文件 (*.json)"
+            self, 
+            "导出项目", 
+            f"{project_name}.openproj", 
+            "OpenProject文件 (*.openproj);;所有文件 (*.*)"
         )
         
         if not file_path:
-            return
-            
-        # 创建并启动导出线程
+            return  # 用户取消
+        
+        # 获取导出选项
+        include_wp = self.include_wp_checkbox.isChecked()
+        include_relations = self.include_relations_checkbox.isChecked()
+        include_comments = self.include_comments_checkbox.isChecked()
+        include_statuses = self.include_statuses_checkbox.isChecked()
+        
+        # 显示进度条
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        
+        # 创建导出线程
         self.export_thread = ExportThread(
-            project_id, file_path,
+            project_id, 
+            file_path,
             include_work_packages=include_wp,
             include_relations=include_relations,
             include_comments=include_comments,
             include_statuses=include_statuses
         )
         
+        # 连接信号
         self.export_thread.progress_update.connect(self.update_progress)
         self.export_thread.export_completed.connect(self.on_export_completed)
         self.export_thread.error_occurred.connect(self.on_export_error)
-        
-        # 更新UI状态
-        self.export_progress.setValue(0)
-        self.export_progress.setVisible(True)
-        self.export_status_label.setText("正在导出...")
-        self.export_btn.setEnabled(False)
         
         # 启动线程
         self.export_thread.start()
     
     def import_project(self):
         """导入项目"""
-        file_path = self.import_file_path.text()
-        if not file_path or not os.path.exists(file_path):
-            QMessageBox.warning(self, "文件错误", "请选择有效的导入文件")
-            return
-            
-        project_name = self.import_project_name.text().strip()
-        force_relations = self.force_relations_check.isChecked()
-        
-        # 创建并启动导入线程
-        self.import_thread = ImportThread(
-            file_path, 
-            project_name=project_name if project_name else None,
-            force_relations=force_relations
+        # 选择导入文件
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "导入项目", 
+            "", 
+            "OpenProject文件 (*.openproj);;所有文件 (*.*)"
         )
         
+        if not file_path:
+            return  # 用户取消
+        
+        # 获取新项目名称
+        project_name = self.import_name_edit.text().strip()
+        
+        # 显示进度条
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        
+        # 创建导入线程
+        self.import_thread = ImportThread(file_path, project_name, self.force_relations_checkbox.isChecked())
+        
+        # 连接信号
         self.import_thread.progress_update.connect(self.update_progress)
         self.import_thread.import_completed.connect(self.on_import_completed)
         self.import_thread.error_occurred.connect(self.on_import_error)
-        
-        # 更新UI状态
-        self.import_progress.setValue(0)
-        self.import_progress.setVisible(True)
-        self.import_status_label.setText("正在导入...")
-        self.import_btn.setEnabled(False)
         
         # 启动线程
         self.import_thread.start()
     
     def update_progress(self, value, message):
-        """更新进度条和状态消息"""
-        if hasattr(self.sender(), "objectName") and self.sender().objectName() == "ExportThread":
-            self.export_progress.setValue(value)
-            self.export_status_label.setText(message)
-        else:
-            self.import_progress.setValue(value)
-            self.import_status_label.setText(message)
+        """更新进度信息"""
+        self.status_label.setText(message)
+        self.progress_bar.setValue(value)
     
     def on_export_completed(self, file_path):
-        """导出完成的处理"""
-        self.export_btn.setEnabled(True)
-        self.export_status_label.setText(f"导出完成! 文件已保存: {file_path}")
+        """导出完成"""
+        self.progress_bar.setVisible(False)
         QMessageBox.information(self, "导出成功", f"项目已成功导出到:\n{file_path}")
     
     def on_export_error(self, error_msg):
-        """导出错误的处理"""
-        self.export_btn.setEnabled(True)
-        self.export_status_label.setText(f"导出失败!")
-        QMessageBox.critical(self, "导出失败", f"导出过程中出错:\n{error_msg}")
+        """导出错误"""
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "导出失败", error_msg)
     
     def on_import_completed(self, project_id):
-        """导入完成的处理"""
-        self.import_btn.setEnabled(True)
-        self.import_status_label.setText(f"导入完成! 项目ID: {project_id}")
-        QMessageBox.information(self, "导入成功", f"项目已成功导入，ID: {project_id}")
-        
-        # 刷新项目列表
-        self.load_projects()
+        """导入完成"""
+        self.progress_bar.setVisible(False)
+        QMessageBox.information(self, "导入成功", "项目已成功导入")
     
     def on_import_error(self, error_msg):
-        """导入错误的处理"""
-        self.import_btn.setEnabled(True)
-        self.import_status_label.setText(f"导入失败!")
-        QMessageBox.critical(self, "导入失败", f"导入过程中出错:\n{error_msg}")
+        """导入错误"""
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "导入失败", error_msg) 

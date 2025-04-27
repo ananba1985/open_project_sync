@@ -116,4 +116,4 @@ def cleanup_task_data(task_data):
         for child in task_data['children']:
             cleaned_data['children'].append(cleanup_task_data(child))
     
-    return cleaned_data
+    return cleaned_data 

@@ -45,4 +45,4 @@ class Config:
         return bool(self.api_url and self.api_token)
 
 # 全局配置实例
-config = Config()
+config = Config() 

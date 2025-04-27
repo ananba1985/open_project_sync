@@ -126,4 +126,4 @@ class ConfigDialog(QDialog):
             QMessageBox.information(self, "保存成功", "配置已保存")
             self.accept()
         else:
-            QMessageBox.critical(self, "保存失败", "配置保存失败，请检查文件权限")
+            QMessageBox.critical(self, "保存失败", "配置保存失败，请检查文件权限") 

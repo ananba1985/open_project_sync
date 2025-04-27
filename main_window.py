@@ -199,25 +199,37 @@ class MainWindow(QMainWindow):
         # 延迟更新导出导入标签页
         QTimer.singleShot(500, update_export_import_projects)
         
+        # 重新连接信号（因为每次load_projects都会创建新的线程）
+        QTimer.singleShot(100, self.connect_loading_signals)
+    
     def on_project_selected(self, project):
-        """处理项目选择事件"""
-        if project:
-            self.update_status(f"已选择项目: {project.get('name')}")
-            # 加载工作包
-            self.work_package_widget.load_work_packages(project)
-        else:
-            self.update_status("未选择项目")
-            # 清空工作包
-            self.work_package_widget.clear()
+        """当项目被选中时"""
+        self.update_status(f"已选择项目: {project.get('name', '')}")
+        
+        # 更新工作包视图
+        self.work_package_widget.set_project(project)
+        
+        # 更新导出导入标签页的当前项目
+        self.export_import_widget.set_current_project(project)
+        
+        # 重新连接信号
+        QTimer.singleShot(100, self.connect_loading_signals)
     
     def show_about(self):
         """显示关于对话框"""
-        about_text = "OpenProject 数据同步工具 v1.0.0\n\n"
-        about_text += "基于OpenProject API的项目和工作包管理工具\n"
-        about_text += "支持查看、编辑、导出导入项目和工作包数据"
-        QMessageBox.about(self, "关于", about_text)
+        QMessageBox.about(self, "关于", 
+                         "OpenProject 数据同步工具\n\n"
+                         "这是一个用于管理OpenProject项目和工作包的工具。\n"
+                         "版本: 1.0.0")
     
     def closeEvent(self, event):
-        """处理窗口关闭事件"""
-        # 可以在这里添加关闭前的确认或保存逻辑
-        event.accept()
+        """关闭窗口事件"""
+        reply = QMessageBox.question(self, '确认退出', 
+                                     "确定要退出程序吗?",
+                                     QMessageBox.Yes | QMessageBox.No,
+                                     QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            event.accept()
+        else:
+            event.ignore() 

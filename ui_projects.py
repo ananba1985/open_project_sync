@@ -159,4 +159,4 @@ class ProjectListWidget(QWidget):
         """项目被点击时"""
         project_data = item.data(Qt.UserRole)
         if project_data:
-            self.project_selected.emit(project_data)
+            self.project_selected.emit(project_data) 
