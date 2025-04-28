@@ -1266,8 +1266,7 @@ class ReportHandler(BaseHTTPRequestHandler):
         # 精确匹配城市的href (最准确的方法)
         if isinstance(task_city, dict) and "href" in task_city:
             is_match = task_city["href"] == city_href
-            if is_match:
-                print(f"通过href匹配: 任务={task_id}, 城市={city_name}")
+
             return is_match
         
         # 如果是城市列表，检查是否包含目标城市
