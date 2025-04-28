@@ -1817,13 +1817,12 @@ class ReportHandler(BaseHTTPRequestHandler):
                     z-index: 1;
                 }}
                 
-                /* 自定义悬浮提示样式 */
-                .report-table td[title] {{
+                /* 自定义悬浮提示样式 - 使用JavaScript实现 */
+                .report-table td {{
                     position: relative;
                 }}
                 
-                .report-table td[title]:hover::before {{
-                    content: attr(title);
+                .tooltip {{
                     position: absolute;
                     bottom: 100%;
                     left: 50%;
@@ -1837,24 +1836,23 @@ class ReportHandler(BaseHTTPRequestHandler):
                     white-space: pre-wrap;
                     max-width: 300px;
                     min-width: 200px;
-                    z-index: 100;
+                    z-index: 2000;
                     text-align: left;
                     box-shadow: 0 2px 8px rgba(0,0,0,0.2);
                     line-height: 1.4;
                     pointer-events: none;
+                    display: none;
                 }}
                 
-                .report-table td[title]:hover::after {{
+                .tooltip:after {{
                     content: '';
                     position: absolute;
-                    top: -5px;
+                    top: 100%;
                     left: 50%;
                     transform: translateX(-50%);
                     border-width: 5px;
                     border-style: solid;
                     border-color: rgba(0,0,0,0.8) transparent transparent transparent;
-                    z-index: 100;
-                    pointer-events: none;
                 }}
             </style>
             <link rel="icon" href="data:,">
@@ -1957,6 +1955,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 <p>生成时间：""" + report_data.get('generated_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S')) + """</p>
                 <p>© 2023-2024 OpenProject数据同步工具</p>
             </div>
+            <div id="custom-tooltip" style="position:absolute; background-color:rgba(0,0,0,0.8); color:white; padding:8px 12px; border-radius:4px; font-size:14px; max-width:300px; min-width:200px; display:none; z-index:2000; pointer-events:none;"></div>
             <script>
                 function refreshData() {
                     const loading = document.querySelector('.loading');
@@ -1986,6 +1985,39 @@ class ReportHandler(BaseHTTPRequestHandler):
                             });
                         });
                     }
+                    
+                    // 单一悬浮提示实现
+                    const tooltip = document.getElementById('custom-tooltip');
+                    const cells = document.querySelectorAll('.report-table td[title]');
+                    
+                    cells.forEach(cell => {
+                        // 保存原始title内容并移除
+                        const tooltipText = cell.getAttribute('title');
+                        cell.removeAttribute('title');
+                        cell.dataset.tooltip = tooltipText;
+                        
+                        // 鼠标进入显示提示
+                        cell.addEventListener('mouseenter', function() {
+                            // 首先确保所有其他提示都被隐藏
+                            tooltip.style.display = 'none';
+                            
+                            // 设置提示内容
+                            tooltip.textContent = this.dataset.tooltip;
+                            
+                            // 计算位置
+                            const rect = this.getBoundingClientRect();
+                            tooltip.style.left = rect.left + rect.width/2 - tooltip.offsetWidth/2 + 'px';
+                            tooltip.style.top = rect.top - tooltip.offsetHeight - 10 + 'px';
+                            
+                            // 显示提示
+                            tooltip.style.display = 'block';
+                        });
+                        
+                        // 鼠标离开隐藏提示
+                        cell.addEventListener('mouseleave', function() {
+                            tooltip.style.display = 'none';
+                        });
+                    });
                 });
             </script>
         </body>
