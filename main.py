@@ -186,6 +186,19 @@ def main():
                 background-color: #cccccc;
                 color: #666666;
             }
+            QComboBox QAbstractItemView {
+                selection-background-color: #d0e7ff;
+                background-color: white;
+                border: 1px solid #c0c0c0;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 15px;
+                border-left-width: 1px;
+                border-left-color: #c0c0c0;
+                border-left-style: solid;
+            }
         """)
         
         # 创建主窗口
