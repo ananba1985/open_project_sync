@@ -314,7 +314,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                         tasks_status[task_id] = {}
                     
                     tasks_status[task_id][city_name] = task_status
-                    print(f"  设置工作包 {task_id} 在 {city_name} 的状态为: {task_status}")
+                    #print(f"  设置工作包 {task_id} 在 {city_name} 的状态为: {task_status}")
                 
                 # 保存统计信息
                 city_statistics[city_name] = status_count
@@ -1260,8 +1260,8 @@ class ReportHandler(BaseHTTPRequestHandler):
             city_href = f"/api/v3/custom_options/{city_id}"
         
         # 打印调试信息
-        print(f"匹配城市: 任务ID={task_id}, 城市检查: {city_name}(ID={city_id}, href={city_href})")
-        print(f"任务城市数据: {task_city}")
+        # print(f"匹配城市: 任务ID={task_id}, 城市检查: {city_name}(ID={city_id}, href={city_href})")
+        # print(f"任务城市数据: {task_city}")
         
         # 精确匹配城市的href (最准确的方法)
         if isinstance(task_city, dict) and "href" in task_city:
@@ -1955,7 +1955,7 @@ class ReportHandler(BaseHTTPRequestHandler):
                 <p>生成时间：""" + report_data.get('generated_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S')) + """</p>
                 <p>© 2023-2024 OpenProject数据同步工具</p>
             </div>
-            <div id="custom-tooltip" style="position:absolute; background-color:rgba(0,0,0,0.8); color:white; padding:8px 12px; border-radius:4px; font-size:14px; max-width:300px; min-width:200px; display:none; z-index:2000; pointer-events:none;"></div>
+            <div id="custom-tooltip" style="position:fixed; background-color:rgba(0,0,0,0.8); color:white; padding:8px 12px; border-radius:4px; font-size:14px; max-width:300px; min-width:200px; display:none; z-index:2000; pointer-events:none;"></div>
             <script>
                 function refreshData() {
                     const loading = document.querySelector('.loading');
@@ -1983,6 +1983,10 @@ class ReportHandler(BaseHTTPRequestHandler):
                             firstCells.forEach(cell => {
                                 cell.style.transform = `translateX(${this.scrollLeft}px)`;
                             });
+                            
+                            // 隐藏悬浮提示框（滚动时）
+                            const tooltip = document.getElementById('custom-tooltip');
+                            tooltip.style.display = 'none';
                         });
                     }
                     
@@ -1997,26 +2001,65 @@ class ReportHandler(BaseHTTPRequestHandler):
                         cell.dataset.tooltip = tooltipText;
                         
                         // 鼠标进入显示提示
-                        cell.addEventListener('mouseenter', function() {
-                            // 首先确保所有其他提示都被隐藏
-                            tooltip.style.display = 'none';
-                            
+                        cell.addEventListener('mouseenter', function(event) {
                             // 设置提示内容
                             tooltip.textContent = this.dataset.tooltip;
                             
-                            // 计算位置
-                            const rect = this.getBoundingClientRect();
-                            tooltip.style.left = rect.left + rect.width/2 - tooltip.offsetWidth/2 + 'px';
-                            tooltip.style.top = rect.top - tooltip.offsetHeight - 10 + 'px';
-                            
-                            // 显示提示
+                            // 先隐藏但渲染出来，以便获取正确的尺寸
+                            tooltip.style.visibility = 'hidden';
                             tooltip.style.display = 'block';
+                            
+                            // 等待下一帧渲染完成
+                            requestAnimationFrame(() => {
+                                // 获取单元格的位置
+                                const rect = this.getBoundingClientRect();
+                                
+                                // 计算提示框的位置 - 保持在单元格上方
+                                const tooltipHeight = tooltip.offsetHeight;
+                                const tooltipWidth = tooltip.offsetWidth;
+                                
+                                let top = rect.top - tooltipHeight - 10;
+                                const left = rect.left + (rect.width / 2) - (tooltipWidth / 2);
+                                
+                                // 如果顶部位置小于0（超出视口上边界），则改为显示在单元格下方
+                                if (top < 0) {
+                                    top = rect.bottom + 10;
+                                }
+                                
+                                // 设置位置
+                                tooltip.style.top = `${top}px`;
+                                tooltip.style.left = `${left}px`;
+                                
+                                // 确保不超出右边界
+                                const rightEdge = left + tooltipWidth;
+                                if (rightEdge > window.innerWidth) {
+                                    tooltip.style.left = `${window.innerWidth - tooltipWidth - 10}px`;
+                                }
+                                
+                                // 确保不超出左边界
+                                if (left < 0) {
+                                    tooltip.style.left = '10px';
+                                }
+                                
+                                // 显示提示
+                                tooltip.style.visibility = 'visible';
+                            });
                         });
                         
                         // 鼠标离开隐藏提示
                         cell.addEventListener('mouseleave', function() {
                             tooltip.style.display = 'none';
                         });
+                    });
+                    
+                    // 全局滚动时隐藏tooltip
+                    window.addEventListener('scroll', function() {
+                        tooltip.style.display = 'none';
+                    });
+                    
+                    // 窗口大小改变时隐藏tooltip
+                    window.addEventListener('resize', function() {
+                        tooltip.style.display = 'none';
                     });
                 });
             </script>

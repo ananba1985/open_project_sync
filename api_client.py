@@ -397,6 +397,103 @@ class OpenProjectClient:
             print(f"获取工作包详情出错: {str(e)}")
             return None
     
+    def get_work_package_attachments(self, work_package_id):
+        """获取工作包的附件列表
+        
+        Args:
+            work_package_id: 工作包ID
+            
+        Returns:
+            附件列表，失败时返回空列表
+        """
+        try:
+            url = f"{self.api_url}/api/v3/work_packages/{work_package_id}/attachments"
+            
+            response = self._session.get(
+                url,
+                auth=self.auth
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                attachments = result.get("_embedded", {}).get("elements", [])
+                return attachments
+            else:
+                print(f"获取工作包附件失败: {response.status_code} - {response.text}")
+                return []
+        except Exception as e:
+            print(f"获取工作包附件出错: {str(e)}")
+            return []
+    
+    def get_work_package_file_links(self, work_package_id):
+        """获取工作包的文件链接列表
+        
+        Args:
+            work_package_id: 工作包ID
+            
+        Returns:
+            文件链接列表，失败时返回空列表
+        """
+        try:
+            url = f"{self.api_url}/api/v3/work_packages/{work_package_id}/file_links"
+            
+            response = self._session.get(
+                url,
+                auth=self.auth
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                file_links = result.get("_embedded", {}).get("elements", [])
+                return file_links
+            else:
+                print(f"获取工作包文件链接失败: {response.status_code} - {response.text}")
+                return []
+        except Exception as e:
+            print(f"获取工作包文件链接出错: {str(e)}")
+            return []
+    
+    def download_attachment(self, attachment_id):
+        """下载附件内容
+        
+        Args:
+            attachment_id: 附件ID
+            
+        Returns:
+            (附件内容二进制数据, 文件名, 内容类型)元组，失败时返回(None, None, None)
+        """
+        try:
+            url = f"{self.api_url}/api/v3/attachments/{attachment_id}/content"
+            
+            response = self._session.get(
+                url,
+                auth=self.auth,
+                stream=True  # 使用流式下载
+            )
+            
+            if response.status_code == 200:
+                # 获取文件名和内容类型
+                content_disposition = response.headers.get('Content-Disposition', '')
+                filename = None
+                if content_disposition:
+                    # 提取文件名
+                    match = re.search(r'filename="?([^";]+)"?', content_disposition)
+                    if match:
+                        filename = match.group(1)
+                
+                content_type = response.headers.get('Content-Type', 'application/octet-stream')
+                
+                # 获取完整的二进制内容
+                content = response.content
+                
+                return (content, filename, content_type)
+            else:
+                print(f"下载附件失败: {response.status_code} - {response.text}")
+                return (None, None, None)
+        except Exception as e:
+            print(f"下载附件出错: {str(e)}")
+            return (None, None, None)
+    
     def get_custom_field_options(self, field_id):
         """获取自定义字段选项
         
